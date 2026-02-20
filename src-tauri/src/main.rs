@@ -1,11 +1,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 use std::{fs, path::PathBuf};
 use serde_json::{json, Value};
-use tauri::{AppHandle, Manager}; 
+use tauri::{AppHandle, Manager};
 use base64::{engine::general_purpose, Engine as _};
 use reqwest::Client;
 
 const RIOT_API_KEY: &str = "RGAPI-1c100836-5686-499d-85c2-24205bb7db1c";
+const OPGG_MCP_URL: &str = "https://mcp-api.op.gg/mcp";
 
 fn get_lockfile_path() -> PathBuf {
     PathBuf::from(r"C:\Riot Games\League of Legends\lockfile")
@@ -64,6 +65,53 @@ async fn fetch_match_detail(match_id: &str, client: &Client) -> Value {
         Ok(res) => res.json::<Value>().await.unwrap_or(json!({})),
         Err(_) => json!({}),
     }
+}
+
+// Chiama un tool del server MCP di OP.GG
+async fn call_opgg_tool(tool_name: &str, arguments: Value, client: &Client) -> Result<Value, String> {
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": tool_name,
+            "arguments": arguments
+        }
+    });
+
+    let res = client
+        .post(OPGG_MCP_URL)
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json, text/event-stream")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let text = res.text().await.map_err(|e| e.to_string())?;
+
+    // Il server MCP risponde con SSE (text/event-stream), parsechiamo il JSON dalle righe "data:"
+    for line in text.lines() {
+        if let Some(data) = line.strip_prefix("data: ") {
+            if let Ok(parsed) = serde_json::from_str::<Value>(data) {
+                // Estrai il contenuto dal formato MCP
+                if let Some(content) = parsed["result"]["content"].as_array() {
+                    for item in content {
+                        if item["type"] == "text" {
+                            if let Some(text_val) = item["text"].as_str() {
+                                if let Ok(inner) = serde_json::from_str::<Value>(text_val) {
+                                    return Ok(inner);
+                                }
+                            }
+                        }
+                    }
+                }
+                return Ok(parsed);
+            }
+        }
+    }
+
+    Err(format!("Risposta OP.GG non valida: {}", &text[..200.min(text.len())]))
 }
 
 #[tauri::command]
@@ -184,12 +232,10 @@ async fn search_summoner(game_name: String, tag_line: String) -> Result<Value, S
         .build()
         .unwrap();
 
-    // 1. PUUID da Riot API
     let puuid = fetch_puuid(&game_name, &tag_line, &client)
         .await
         .ok_or("Summoner non trovato. Controlla nome e tag.")?;
 
-    // 2. Dati account
     let account_url = format!(
         "https://europe.api.riotgames.com/riot/account/v1/accounts/by-puuid/{}",
         puuid
@@ -204,7 +250,27 @@ async fn search_summoner(game_name: String, tag_line: String) -> Result<Value, S
         .await
         .map_err(|_| "Errore JSON account")?;
 
-    // 3. Dati summoner da EUW (level, icon)
+    // Riot ha deprecato "id" in /summoner/v4/summoners/by-puuid su alcune region.
+    // Usiamo /lol/league/v4/entries/by-puuid/ che accetta direttamente il PUUID.
+    let ranked_url = format!(
+        "https://euw1.api.riotgames.com/lol/league/v4/entries/by-puuid/{}",
+        puuid
+    );
+    println!("ranked_url: {}", ranked_url);
+
+    let ranked_res = client
+        .get(&ranked_url)
+        .header("X-Riot-Token", RIOT_API_KEY)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let ranked_text = ranked_res.text().await.unwrap_or_default();
+    println!("ranked_entries raw: {}", ranked_text);
+
+    let ranked_entries: Value = serde_json::from_str(&ranked_text).unwrap_or(json!([]));
+
+    // summoner_level e profileIconId li prendiamo dalla risposta by-puuid che già abbiamo
     let summoner_url = format!(
         "https://euw1.api.riotgames.com/lol/summoner/v4/summoners/by-puuid/{}",
         puuid
@@ -217,32 +283,34 @@ async fn search_summoner(game_name: String, tag_line: String) -> Result<Value, S
         .map_err(|e| e.to_string())?
         .json()
         .await
-        .map_err(|_| "Errore JSON summoner")?;
+        .unwrap_or(json!({}));
 
-    // 4. Rank
-    let summoner_id = summoner["id"].as_str().unwrap_or("").to_string();
-    let ranked_url = format!(
-        "https://euw1.api.riotgames.com/lol/league/v4/entries/by-summoner/{}",
-        summoner_id
-    );
-    let ranked_entries: Value = client
-        .get(&ranked_url)
-        .header("X-Riot-Token", RIOT_API_KEY)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?
-        .json()
-        .await
-        .unwrap_or(json!([]));
-
-    // 5. Ultimi 10 match
     let match_ids = fetch_match_ids(&puuid, 0, 10, &client).await;
     let mut match_details: Vec<Value> = vec![];
     for id in match_ids.iter() {
-        println!("Fetching searched summoner match: {}", id);
-        let detail = fetch_match_detail(&id, &client).await;
+        println!("Fetching search match: {}", id);
+        let detail = fetch_match_detail(id, &client).await;
         match_details.push(detail);
     }
+
+    // Normalizza ranked_entries: assicura che "rank" esista
+    // (Riot API search restituisce "rank", ma verifichiamo anche "division" come fallback)
+    let normalized_entries: Vec<Value> = ranked_entries
+        .as_array()
+        .unwrap_or(&vec![])
+        .iter()
+        .map(|e| {
+            let mut entry = e.clone();
+            if entry["rank"].is_null() || entry["rank"].as_str().unwrap_or("") == "" {
+                if let Some(div) = e["division"].as_str() {
+                    entry["rank"] = json!(div);
+                }
+            }
+            entry
+        })
+        .collect();
+
+    println!("Ranked entries trovati per search: {}", normalized_entries.len());
 
     Ok(json!({
         "puuid": puuid,
@@ -254,14 +322,64 @@ async fn search_summoner(game_name: String, tag_line: String) -> Result<Value, S
             "xpSinceLastLevel": 0,
             "xpUntilNextLevel": 1,
         },
-        "ranked_entries": ranked_entries,
+        "ranked_entries": normalized_entries,
         "matches": match_details,
+    }))
+}
+
+#[tauri::command]
+async fn get_opgg_data(game_name: String, tag_line: String) -> Result<Value, String> {
+    let client = Client::builder()
+        .danger_accept_invalid_certs(true)
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        .build()
+        .unwrap();
+
+    // 1. Profilo summoner con rank e champion pool
+    let profile_result = call_opgg_tool(
+        "lol_get_summoner_profile",
+        json!({
+            "summoner_id": format!("{}#{}", game_name, tag_line),
+            "region": "euw",
+            "desired_output_fields": [
+                "data.summoner.{game_name,tagline,level}",
+                "data.summoner.league_stats[].{game_type,win,lose,is_ranked}",
+                "data.summoner.league_stats[].tier_info.{tier,division,lp}",
+                "data.summoner.most_champion_stats[].{champion_id,play,win,lose,kill,death,assist,kda}"
+            ]
+        }),
+        &client,
+    ).await;
+
+    // 2. Meta champion per lane (dati globali)
+    let meta_result = call_opgg_tool(
+        "lol_list_lane_meta_champions",
+        json!({
+            "region": "euw",
+            "desired_output_fields": [
+                "data[].{champion_id,position,tier,win_rate,pick_rate,ban_rate,kda}"
+            ]
+        }),
+        &client,
+    ).await;
+
+    println!("OP.GG profile result: {:?}", profile_result.is_ok());
+    println!("OP.GG meta result: {:?}", meta_result.is_ok());
+
+    Ok(json!({
+        "profile": profile_result.unwrap_or(json!(null)),
+        "meta": meta_result.unwrap_or(json!(null)),
     }))
 }
 
 fn main() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![get_profiles, get_more_matches, search_summoner])
+        .invoke_handler(tauri::generate_handler![
+            get_profiles,
+            get_more_matches,
+            search_summoner,
+            get_opgg_data
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

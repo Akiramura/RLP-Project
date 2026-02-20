@@ -4,7 +4,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "./components/ui/tabs";
 import { ProfileTab } from "./components/profile-tab";
 import { MatchHistoryTab } from "./components/match-history-tab";
 import { ChampionMetaTab } from "./components/champion-meta-tab";
-import { User, History, TrendingUp, Search } from "lucide-react";
+import { MetaTab } from "./components/meta-tab";
+import { User, History, TrendingUp, Search, BarChart2 } from "lucide-react";
 import { Input } from "./components/ui/input";
 import { Button } from "./components/ui/button";
 import "./App.css";
@@ -18,7 +19,6 @@ export default function App() {
     const [loadingMore, setLoadingMore] = useState(false);
     const matchesInitialized = useRef(false);
 
-    // Search states
     const [searchQuery, setSearchQuery] = useState("");
     const [searchData, setSearchData] = useState(null);
     const [searching, setSearching] = useState(false);
@@ -55,7 +55,6 @@ export default function App() {
     async function fetchData() {
         try {
             const res = await invoke("get_profiles");
-            console.log("Dati ricevuti:", res);
             setProfileData(res);
             setError(null);
 
@@ -159,12 +158,14 @@ export default function App() {
     const rankedSolo = profileData ? mapRanked(profileData.ranked, "RANKED_SOLO_5x5") : null;
     const rankedFlex = profileData ? mapRanked(profileData.ranked, "RANKED_FLEX_SR") : null;
 
-    // Dati del summoner cercato
     const searchMatches = searchData?.matches
         ?.map(m => extractPlayerData(m, searchData.puuid))
         ?.filter(Boolean) || [];
     const searchRankedSolo = searchData ? mapRankedFromEntries(searchData.ranked_entries, "RANKED_SOLO_5x5") : null;
     const searchRankedFlex = searchData ? mapRankedFromEntries(searchData.ranked_entries, "RANKED_FLEX_SR") : null;
+
+    const activeMatches = searchData ? searchMatches : allMatches;
+    const activeProfile = searchData ? searchData.profile : profileData?.profile;
 
     return (
         <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
@@ -275,7 +276,15 @@ export default function App() {
                             className="data-[state=active]:bg-blue-600 data-[state=active]:text-white"
                         >
                             <TrendingUp className="w-4 h-4 mr-2" />
-                            Champion Meta
+                            Champion Stats
+                        </TabsTrigger>
+                        {/* ↓ NUOVO TAB AGGIUNTO ↓ */}
+                        <TabsTrigger
+                            value="tier-list"
+                            className="data-[state=active]:bg-blue-600 data-[state=active]:text-white"
+                        >
+                            <BarChart2 className="w-4 h-4 mr-2" />
+                            Tier List
                         </TabsTrigger>
                     </TabsList>
 
@@ -333,8 +342,17 @@ export default function App() {
                     </TabsContent>
 
                     <TabsContent value="meta">
-                        <ChampionMetaTab />
+                        <ChampionMetaTab
+                            matches={activeMatches}
+                            profile={activeProfile}
+                        />
                     </TabsContent>
+
+                    {/* ↓ NUOVO CONTENT AGGIUNTO ↓ */}
+                    <TabsContent value="tier-list">
+                        <MetaTab />
+                    </TabsContent>
+
                 </Tabs>
             </main>
 
