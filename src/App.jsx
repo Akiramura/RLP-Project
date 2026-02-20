@@ -5,10 +5,11 @@ import { ProfileTab } from "./components/profile-tab";
 import { MatchHistoryTab } from "./components/match-history-tab";
 import { ChampionMetaTab } from "./components/champion-meta-tab";
 import { MetaTab } from "./components/meta-tab";
-import { User, History, TrendingUp, Search, BarChart2 } from "lucide-react";
+import { User, History, TrendingUp, Search, BarChart2, Swords } from "lucide-react";
 import { Input } from "./components/ui/input";
 import { Button } from "./components/ui/button";
 import "./App.css";
+import { ChampSelectTab } from "./components/champ-select-tab";
 
 export default function App() {
     const [profileData, setProfileData] = useState(null);
@@ -18,6 +19,7 @@ export default function App() {
     const [matchOffset, setMatchOffset] = useState(0);
     const [loadingMore, setLoadingMore] = useState(false);
     const matchesInitialized = useRef(false);
+    const lastLoadedPuuid = useRef(null);
 
     const [seasonFetchDone, setSeasonFetchDone] = useState(false);
     const seasonFetchRunning = useRef(false);
@@ -142,7 +144,7 @@ export default function App() {
             setProfileData(res);
             setError(null);
 
-            if (res?.matches && !matchesInitialized.current) {
+            if (res?.matches && (!matchesInitialized.current || lastLoadedPuuid.current !== res.puuid)) {
                 const extracted = res.matches
                     .map(m => extractPlayerData(m, res.puuid))
                     .filter(Boolean);
@@ -150,7 +152,10 @@ export default function App() {
                 const initialOffset = res.matches.length;
                 setMatchOffset(initialOffset);
                 matchesInitialized.current = true;
-
+                lastLoadedPuuid.current = res.puuid;
+                // Reset season fetch state for new account
+                seasonFetchRunning.current = false;
+                setSeasonFetchDone(false);
                 // Avvia fetch automatico di tutta la season in background
                 fetchSeasonMatches(res.puuid, initialOffset);
             }
@@ -415,6 +420,13 @@ export default function App() {
                             <BarChart2 className="w-4 h-4 mr-2" />
                             Tier List
                         </TabsTrigger>
+                        <TabsTrigger
+                            value="champ-select"
+                            className="data-[state=active]:bg-blue-600 data-[state=active]:text-white"
+                        >
+                            <Swords className="w-4 h-4 mr-2" />
+                            Auto Import
+                        </TabsTrigger>
                     </TabsList>
 
                     <TabsContent value="profile">
@@ -491,6 +503,10 @@ export default function App() {
 
                     <TabsContent value="tier-list">
                         <MetaTab />
+                    </TabsContent>
+
+                    <TabsContent value="champ-select">
+                        <ChampSelectTab />
                     </TabsContent>
 
                 </Tabs>

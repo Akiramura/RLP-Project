@@ -3,7 +3,7 @@ import { Card } from "./ui/card";
 import { Badge } from "./ui/badge";
 import { TrendingUp, Swords, Trophy, Target, Zap, AlertTriangle, Filter } from "lucide-react";
 
-const PATCH = "14.24.1";
+const PATCH = "16.4.1";
 
 // Patch 14.24 iniziata il 27 Novembre 2024, 14.1 (Season 2025) il 8 Gennaio 2025
 const PATCH_SCHEDULE = [

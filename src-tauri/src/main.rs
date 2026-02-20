@@ -4,59 +4,86 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 use base64::{engine::general_purpose, Engine as _};
 use reqwest::Client;
-use tokio_postgres::NoTls;
 use tokio::sync::OnceCell;
+use deadpool_postgres::{Config, Pool, Runtime, ManagerConfig, RecyclingMethod};
 use native_tls::TlsConnector;
 use postgres_native_tls::MakeTlsConnector;
 
-const RIOT_API_KEY: &str = "RGAPI-1c100836-5686-499d-85c2-24205bb7db1c";
+// ── Cargo.toml dependencies needed ──────────────────────────────────────────
+// deadpool-postgres = { version = "0.14", features = ["rt_tokio_1"] }
+// tokio-postgres    = { version = "0.7" }
+// postgres-native-tls = "0.5"
+// native-tls        = "0.2"
+// ────────────────────────────────────────────────────────────────────────────
+
+mod champ_select;
+use champ_select::{get_champ_select_session, auto_import_build, debug_champ_select_slot};
+
+const RIOT_API_KEY: &str = "RGAPI-f074c374-0fed-4612-a46b-0d0c18ab76ba";
 const OPGG_MCP_URL: &str = "https://mcp-api.op.gg/mcp";
-const NEON_URL: &str = "postgresql://neondb_owner:npg_iGh6YXECB7ML@ep-muddy-voice-als8bfl8-pooler.c-3.eu-central-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require";
 
-static PG: OnceCell<tokio_postgres::Client> = OnceCell::const_new();
+// OnceCell stores Option<Pool> so we never retry a failed init
+static POOL: OnceCell<Option<Pool>> = OnceCell::const_new();
 
-async fn get_pg() -> Option<&'static tokio_postgres::Client> {
-    PG.get_or_try_init(|| async {
-        let connector = TlsConnector::builder()
+async fn get_pool() -> Option<&'static Pool> {
+    POOL.get_or_init(|| async {
+        let mut cfg = Config::new();
+        cfg.host     = Some("ep-muddy-voice-als8bfl8-pooler.c-3.eu-central-1.aws.neon.tech".to_string());
+        cfg.port     = Some(5432);
+        cfg.dbname   = Some("neondb".to_string());
+        cfg.user     = Some("neondb_owner".to_string());
+        cfg.password = Some("npg_iGh6YXECB7ML".to_string());
+        cfg.manager  = Some(ManagerConfig { recycling_method: RecyclingMethod::Fast });
+
+        let connector = match TlsConnector::builder()
             .danger_accept_invalid_certs(true)
             .build()
-            .expect("Errore build TLS");
+        {
+            Ok(c)  => c,
+            Err(e) => { eprintln!("❌ TLS error: {}", e); return None; }
+        };
         let tls = MakeTlsConnector::new(connector);
 
-        let (client, connection) = tokio_postgres::connect(NEON_URL, tls)
-            .await
-            .map_err(|e| { eprintln!("❌ Errore connessione Neon: {}", e); e })?;
+        let pool: Pool = match cfg.create_pool(Some(Runtime::Tokio1), tls) {
+            Ok(p)  => p,
+            Err(e) => { eprintln!("❌ Pool create error: {}", e); return None; }
+        };
 
-        tokio::spawn(async move {
-            if let Err(e) = connection.await {
-                eprintln!("❌ Connessione Neon persa: {}", e);
-            }
-        });
-
-        client.batch_execute("
+        let client = match pool.get().await {
+            Ok(c)  => c,
+            Err(e) => { eprintln!("❌ Pool get error: {}", e); return None; }
+        };
+        if let Err(e) = client.batch_execute("
             CREATE TABLE IF NOT EXISTS match_cache (
-                match_id TEXT PRIMARY KEY,
-                data JSONB NOT NULL,
-                cached_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                match_id   TEXT PRIMARY KEY,
+                data       JSONB NOT NULL,
+                cached_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
             CREATE TABLE IF NOT EXISTS summoner_cache (
-                puuid TEXT PRIMARY KEY,
-                game_name TEXT NOT NULL,
-                tag_line TEXT NOT NULL,
-                profile JSONB NOT NULL,
+                puuid          TEXT PRIMARY KEY,
+                game_name      TEXT NOT NULL,
+                tag_line       TEXT NOT NULL,
+                profile        JSONB NOT NULL,
                 ranked_entries JSONB NOT NULL,
-                matches JSONB NOT NULL,
-                cached_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                matches        JSONB NOT NULL,
+                cached_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
-        ").await.map_err(|e| { eprintln!("❌ Errore creazione tabelle: {}", e); e })?;
+        ").await {
+            eprintln!("❌ Tabelle error: {}", e);
+            return None;
+        }
 
-        println!("✓ Neon DB connesso e tabelle pronte.");
-        Ok::<tokio_postgres::Client, tokio_postgres::Error>(client)
-    }).await.ok()
+        println!("✓ Neon pool pronto.");
+        Some(pool)
+    }).await.as_ref()
 }
 
+// ── DB helpers ───────────────────────────────────────────────────────────────
+
 async fn db_get_match(match_id: &str) -> Option<Value> {
-    let pg = get_pg().await?;
+    let pool: &Pool = get_pool().await?;
+    let pg = pool.get().await
+        .map_err(|e| eprintln!("❌ db_get_match pool: {}", e)).ok()?;
     let row = pg
         .query_opt("SELECT data::text FROM match_cache WHERE match_id = $1", &[&match_id])
         .await.ok()??;
@@ -65,18 +92,21 @@ async fn db_get_match(match_id: &str) -> Option<Value> {
 }
 
 async fn db_save_match(match_id: &str, data: &Value) {
-    if let Some(pg) = get_pg().await {
-        let raw = data.to_string();
-        let _ = pg.execute(
-            "INSERT INTO match_cache (match_id, data) VALUES ($1, $2::jsonb)
-             ON CONFLICT (match_id) DO NOTHING",
-            &[&match_id, &raw],
-        ).await;
-    }
+    let pool: &Pool = match get_pool().await { Some(p) => p, None => return };
+    let pg = match pool.get().await {
+        Ok(c)  => c,
+        Err(e) => { eprintln!("❌ db_save_match pool: {}", e); return; }
+    };
+    let _ = pg.execute(
+        "INSERT INTO match_cache (match_id, data) VALUES ($1, $2)",
+        &[&match_id, data],
+    ).await;
 }
 
 async fn db_get_summoner(puuid: &str) -> Option<Value> {
-    let pg = get_pg().await?;
+    let pool: &Pool = get_pool().await?;
+    let pg = pool.get().await
+        .map_err(|e| eprintln!("❌ db_get_summoner pool: {}", e)).ok()?;
     let row = pg.query_opt(
         "SELECT profile::text, ranked_entries::text, matches::text, cached_at
          FROM summoner_cache WHERE puuid = $1",
@@ -84,15 +114,16 @@ async fn db_get_summoner(puuid: &str) -> Option<Value> {
     ).await.ok()??;
 
     let cached_at: chrono::DateTime<chrono::Utc> = row.get(3);
-    let age = chrono::Utc::now() - cached_at;
-    if age.num_minutes() > 60 {
-        println!("Cache summoner {} scaduta ({} min), rifresco.", puuid, age.num_minutes());
+    let age: chrono::TimeDelta = chrono::Utc::now() - cached_at;
+    let mins = age.num_minutes();
+    if mins > 60 {
+        println!("Cache summoner {} scaduta ({} min), rifresco.", puuid, mins);
         return None;
     }
 
-    let profile: Value = serde_json::from_str(&row.get::<_, String>(0)).ok()?;
+    let profile: Value        = serde_json::from_str(&row.get::<_, String>(0)).ok()?;
     let ranked_entries: Value = serde_json::from_str(&row.get::<_, String>(1)).ok()?;
-    let matches: Value = serde_json::from_str(&row.get::<_, String>(2)).ok()?;
+    let matches: Value        = serde_json::from_str(&row.get::<_, String>(2)).ok()?;
 
     Some(json!({
         "puuid": puuid,
@@ -104,28 +135,29 @@ async fn db_get_summoner(puuid: &str) -> Option<Value> {
 }
 
 async fn db_save_summoner(puuid: &str, profile: &Value, ranked_entries: &Value, matches: &Value) {
-    if let Some(pg) = get_pg().await {
-        let gn = profile["gameName"].as_str().unwrap_or("");
-        let tl = profile["tagLine"].as_str().unwrap_or("");
-        let p = profile.to_string();
-        let r = ranked_entries.to_string();
-        let m = matches.to_string();
-        let result = pg.execute(
-            "INSERT INTO summoner_cache (puuid, game_name, tag_line, profile, ranked_entries, matches, cached_at)
-             VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, NOW())
-             ON CONFLICT (puuid) DO UPDATE SET
-               profile = EXCLUDED.profile,
-               ranked_entries = EXCLUDED.ranked_entries,
-               matches = EXCLUDED.matches,
-               cached_at = NOW()",
-            &[&puuid, &gn, &tl, &p, &r, &m],
-        ).await;
-        match result {
-            Ok(_) => println!("✓ Summoner {} salvato in Neon.", puuid),
-            Err(e) => eprintln!("❌ Errore salvataggio summoner {}: {}", puuid, e),
-        }
+    let pool: &Pool = match get_pool().await { Some(p) => p, None => return };
+    let pg = match pool.get().await {
+        Ok(c)  => c,
+        Err(e) => { eprintln!("❌ db_save_summoner pool: {}", e); return; }
+    };
+    let gn = profile["gameName"].as_str().unwrap_or("").to_string();
+    let tl = profile["tagLine"].as_str().unwrap_or("").to_string();
+    match pg.execute(
+        "INSERT INTO summoner_cache (puuid, game_name, tag_line, profile, ranked_entries, matches, cached_at)
+         VALUES ($1, $2, $3, $4, $5, $6, NOW())
+         ON CONFLICT (puuid) DO UPDATE SET
+           profile        = EXCLUDED.profile,
+           ranked_entries = EXCLUDED.ranked_entries,
+           matches        = EXCLUDED.matches,
+           cached_at      = NOW()",
+        &[&puuid, &gn.as_str(), &tl.as_str(), profile, ranked_entries, matches],
+    ).await {
+        Ok(_)  => println!("✓ Summoner {} salvato in Neon.", puuid),
+        Err(e) => eprintln!("❌ Salvataggio summoner {}: {}", puuid, e),
     }
 }
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
 
 fn get_lockfile_path() -> PathBuf {
     PathBuf::from(r"C:\Riot Games\League of Legends\lockfile")
@@ -142,7 +174,7 @@ async fn fetch_puuid(game_name: &str, tag_line: &str, client: &Client) -> Option
         "https://europe.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{}/{}",
         game_name, tag_line
     );
-    let res = client.get(&url).header("X-Riot-Token", RIOT_API_KEY).send().await.ok()?;
+    let res  = client.get(&url).header("X-Riot-Token", RIOT_API_KEY).send().await.ok()?;
     let data: Value = res.json().await.ok()?;
     data["puuid"].as_str().map(|s| s.to_string())
 }
@@ -201,7 +233,7 @@ async fn call_opgg_tool(tool_name: &str, arguments: Value, client: &Client) -> R
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": { "name": tool_name, "arguments": arguments }
     });
-    let res = client.post(OPGG_MCP_URL)
+    let res  = client.post(OPGG_MCP_URL)
         .header("Content-Type", "application/json")
         .header("Accept", "application/json, text/event-stream")
         .json(&body).send().await.map_err(|e| e.to_string())?;
@@ -227,10 +259,12 @@ async fn call_opgg_tool(tool_name: &str, arguments: Value, client: &Client) -> R
     Err(format!("Risposta OP.GG non valida: {}", &text[..200.min(text.len())]))
 }
 
+// ── Tauri commands ───────────────────────────────────────────────────────────
+
 #[tauri::command]
 async fn get_profiles(handle: AppHandle) -> Result<Value, String> {
     let lock_path = get_lockfile_path();
-    let cache_p = get_cache_path(&handle);
+    let cache_p   = get_cache_path(&handle);
 
     let cached_data: Option<Value> = fs::read_to_string(&cache_p).ok()
         .and_then(|s| serde_json::from_str(&s).ok());
@@ -239,11 +273,11 @@ async fn get_profiles(handle: AppHandle) -> Result<Value, String> {
         return cached_data.ok_or("CLIENT_CLOSED".into());
     }
 
-    let content = fs::read_to_string(lock_path).map_err(|_| "Errore lockfile")?;
+    let content  = fs::read_to_string(lock_path).map_err(|_| "Errore lockfile")?;
     let parts: Vec<&str> = content.split(':').collect();
-    let port = parts[2];
+    let port     = parts[2];
     let password = parts[3];
-    let auth = general_purpose::STANDARD.encode(format!("riot:{}", password));
+    let auth     = general_purpose::STANDARD.encode(format!("riot:{}", password));
 
     let client = Client::builder().danger_accept_invalid_certs(true).build().unwrap();
 
@@ -254,7 +288,7 @@ async fn get_profiles(handle: AppHandle) -> Result<Value, String> {
         .json().await.map_err(|_| "Errore JSON profilo")?;
 
     let game_name = current_profile["gameName"].as_str().unwrap_or("").to_string();
-    let tag_line = current_profile["tagLine"].as_str().unwrap_or("").to_string();
+    let tag_line  = current_profile["tagLine"].as_str().unwrap_or("").to_string();
     if game_name.is_empty() || tag_line.is_empty() {
         return Err("Impossibile leggere gameName/tagLine dal client".into());
     }
@@ -263,7 +297,7 @@ async fn get_profiles(handle: AppHandle) -> Result<Value, String> {
         .ok_or("Impossibile recuperare PUUID da Riot API")?;
 
     if let Some(cache) = &cached_data {
-        let cached_puuid = cache["puuid"].as_str().unwrap_or("");
+        let cached_puuid      = cache["puuid"].as_str().unwrap_or("");
         let matches_are_objects = cache["matches"].as_array()
             .and_then(|arr| arr.first()).map(|f| f.is_object()).unwrap_or(false);
         if cached_puuid == puuid && !puuid.is_empty() && matches_are_objects {
@@ -281,8 +315,7 @@ async fn get_profiles(handle: AppHandle) -> Result<Value, String> {
     let match_ids = fetch_match_ids(&puuid, 0, 10, &client).await;
     let mut match_details: Vec<Value> = vec![];
     for id in match_ids.iter() {
-        let detail = fetch_match_detail(id, &client).await;
-        match_details.push(detail);
+        match_details.push(fetch_match_detail(id, &client).await);
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 
@@ -296,13 +329,12 @@ async fn get_profiles(handle: AppHandle) -> Result<Value, String> {
 
 #[tauri::command]
 async fn get_more_matches(puuid: String, start: u32) -> Result<Value, String> {
-    let client = Client::builder().danger_accept_invalid_certs(true).build().unwrap();
+    let client    = Client::builder().danger_accept_invalid_certs(true).build().unwrap();
     let match_ids = fetch_match_ids(&puuid, start, 5, &client).await;
     let mut details: Vec<Value> = vec![];
     for id in match_ids.iter() {
         println!("Fetching extra match: {}", id);
-        let detail = fetch_match_detail(id, &client).await;
-        details.push(detail);
+        details.push(fetch_match_detail(id, &client).await);
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     Ok(json!(details))
@@ -342,8 +374,7 @@ async fn search_summoner(game_name: String, tag_line: String) -> Result<Value, S
     let match_ids = fetch_match_ids(&puuid, 0, 10, &client).await;
     let mut match_details: Vec<Value> = vec![];
     for id in match_ids.iter() {
-        let detail = fetch_match_detail(id, &client).await;
-        match_details.push(detail);
+        match_details.push(fetch_match_detail(id, &client).await);
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 
@@ -362,7 +393,7 @@ async fn search_summoner(game_name: String, tag_line: String) -> Result<Value, S
         "xpSinceLastLevel": 0, "xpUntilNextLevel": 1,
     });
     let matches_json = json!(match_details);
-    let ranked_json = json!(normalized_entries);
+    let ranked_json  = json!(normalized_entries);
 
     db_save_summoner(&puuid, &profile, &ranked_json, &matches_json).await;
 
@@ -395,14 +426,43 @@ async fn get_opgg_data(game_name: String, tag_line: String) -> Result<Value, Str
     }), &client).await;
     Ok(json!({
         "profile": profile_result.unwrap_or(json!(null)),
-        "meta": meta_result.unwrap_or(json!(null)),
+        "meta":    meta_result.unwrap_or(json!(null)),
     }))
+}
+
+#[tauri::command]
+async fn list_opgg_tools() -> Result<Value, String> {
+    let client = Client::builder()
+        .danger_accept_invalid_certs(true)
+        .user_agent("Mozilla/5.0")
+        .build().unwrap();
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/list",
+        "params": {}
+    });
+    let res = client.post(OPGG_MCP_URL)
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json, text/event-stream")
+        .json(&body).send().await.map_err(|e| e.to_string())?;
+    let text = res.text().await.map_err(|e| e.to_string())?;
+    for line in text.lines() {
+        if let Some(data) = line.strip_prefix("data: ") {
+            if let Ok(parsed) = serde_json::from_str::<Value>(data) {
+                return Ok(parsed);
+            }
+        }
+    }
+    serde_json::from_str(&text).map_err(|_| format!("Raw: {}", &text[..text.len().min(500)]))
 }
 
 fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
-            get_profiles, get_more_matches, search_summoner, get_opgg_data
+            get_profiles, get_more_matches, search_summoner, get_opgg_data,
+            get_champ_select_session, auto_import_build, list_opgg_tools,
+            debug_champ_select_slot  // ← FIX: aggiunto comando mancante
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
