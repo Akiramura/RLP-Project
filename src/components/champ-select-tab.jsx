@@ -6,6 +6,28 @@ import { Shield, Zap, Package, CheckCircle, XCircle, Loader2 } from "lucide-reac
 
 const PATCH = "16.4.1";
 
+// Converte i nomi grezzi da OP.GG (es. "Flash", "Heal") nel nome DDragon corretto
+const SPELL_NAME_MAP = {
+    flash: "SummonerFlash",
+    ignite: "SummonerDot",
+    teleport: "SummonerTeleport",
+    barrier: "SummonerBarrier",
+    exhaust: "SummonerExhaust",
+    ghost: "SummonerHaste",
+    heal: "SummonerHeal",
+    cleanse: "SummonerBoost",
+    smite: "SummonerSmite",
+    clarity: "SummonerMana",
+    mark: "SummonerSnowball",
+};
+
+function spellToDDragon(name) {
+    if (!name) return name;
+    // Se già ha il prefisso "Summoner" lo usiamo direttamente
+    if (name.toLowerCase().startsWith("summoner")) return name;
+    return SPELL_NAME_MAP[name.toLowerCase()] ?? name;
+}
+
 const STATUS = {
     IDLE: "idle",
     DETECTING: "detecting",
@@ -249,7 +271,7 @@ export function ChampSelectTab() {
                                 {importResult.summoner_spells?.map((s, i) => (
                                     <div key={i} className="text-center">
                                         <img
-                                            src={`https://ddragon.leagueoflegends.com/cdn/${PATCH}/img/spell/${s}.png`}
+                                            src={`https://ddragon.leagueoflegends.com/cdn/${PATCH}/img/spell/${spellToDDragon(s)}.png`}
                                             alt={s}
                                             className="w-10 h-10 rounded object-cover"
                                             onError={e => { e.target.style.display = "none"; }}
