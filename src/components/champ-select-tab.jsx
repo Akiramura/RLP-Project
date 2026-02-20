@@ -2,7 +2,7 @@ import { useEffect, useState, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Card } from "./ui/card";
 import { Badge } from "./ui/badge";
-import { Shield, Zap, Package, CheckCircle, XCircle, Loader2, AlertCircle } from "lucide-react";
+import { Shield, Zap, Package, CheckCircle, XCircle, Loader2 } from "lucide-react";
 
 const PATCH = "16.4.1";
 
@@ -62,15 +62,6 @@ export function ChampSelectTab() {
         const ts = new Date().toLocaleTimeString("it-IT");
         setLog(prev => [`[${ts}] ${msg}`, ...prev].slice(0, 30));
     }
-
-    const debugSlot = async () => {
-        try {
-            const result = await invoke("debug_champ_select_slot");
-            alert(JSON.stringify(result, null, 2));
-        } catch (e) {
-            alert("Errore: " + e);
-        }
-    };
 
     // Poll every 2.5s
     useEffect(() => {
@@ -290,11 +281,6 @@ export function ChampSelectTab() {
                     </Card>
                 </div>
             )}
-
-            {/* Debug button - rimuovere dopo */}
-            <button onClick={debugSlot} className="text-xs bg-slate-700 text-white px-3 py-1 rounded">
-                Debug Slot LCU
-            </button>
 
             {/* Log */}
             {log.length > 0 && (

@@ -473,69 +473,8 @@ fn parse_item_section(text: &str, section_name: &str) -> Value {
     Value::Array(vec![])
 }
 
-fn extract_first_item_set(data: &Value, field: &str) -> Value {
-    let path = format!("/data/{}/0", field);
-    if let Some(entry) = data.pointer(&path) {
-        if let Some(ids) = entry.get("ids").and_then(|v| v.as_array()) {
-            let items: Vec<Value> = ids.iter()
-                .filter_map(|v| v.as_u64().map(|id| json!({"id": id})))
-                .collect();
-            if !items.is_empty() { return Value::Array(items); }
-        }
-        if let Some(arr) = entry.as_array() {
-            let items: Vec<Value> = arr.iter()
-                .filter_map(|v| v.as_u64().map(|id| json!({"id": id})))
-                .collect();
-            if !items.is_empty() { return Value::Array(items); }
-        }
-    }
-    Value::Array(vec![])
-}
 
-fn extract_item_ids(summary: &Value, fields: &[&str]) -> Value {
-    for field in fields {
-        if let Some(arr) = summary.get(*field).and_then(|v| v.as_array()) {
-            let items = if arr.first().map(|v| v.is_array()).unwrap_or(false) {
-                arr.first().and_then(|v| v.as_array()).map(|a| a.as_slice()).unwrap_or(&[])
-            } else {
-                arr.as_slice()
-            };
 
-            let ids: Vec<Value> = items.iter()
-                .filter_map(|item| {
-                    item.get("id").and_then(|id| id.as_u64())
-                        .map(|id| json!({ "id": id }))
-                })
-                .collect();
-
-            if !ids.is_empty() {
-                return Value::Array(ids);
-            }
-        }
-    }
-    Value::Array(vec![])
-}
-
-fn extract_summoner_spells(summary: &Value) -> Value {
-    if let Some(arr) = summary.get("summoner_spells").and_then(|v| v.as_array()) {
-        let spells = if arr.first().map(|v| v.is_array()).unwrap_or(false) {
-            arr.first().and_then(|v| v.as_array()).map(|a| a.as_slice()).unwrap_or(&[])
-        } else {
-            arr.as_slice()
-        };
-
-        let names: Vec<Value> = spells.iter().filter_map(|s| {
-            s.as_str().map(|n| json!(n))
-                .or_else(|| s.get("id").and_then(|v| v.as_str()).map(|n| json!(n)))
-                .or_else(|| s.get("spell_id").and_then(|v| v.as_str()).map(|n| json!(n)))
-        }).collect();
-
-        if !names.is_empty() {
-            return Value::Array(names);
-        }
-    }
-    json!(["Flash", "Ignite"])
-}
 
 // ── Import: Rune ─────────────────────────────────────────────────────────────
 
@@ -653,32 +592,42 @@ async fn import_summoners(
     build: &Value,
 ) -> Result<Vec<String>, String> {
 
+    // Cerca summoner_spells in data.summoner_spells o direttamente
     let spells_raw = build.pointer("/data/summoner_spells")
         .or_else(|| build.get("summoner_spells"))
         .and_then(|v| v.as_array())
-        .ok_or("Summoner spells non trovate")?;
+        .ok_or("Summoner spells non trovate nel build")?;
 
     let spell_names: Vec<String> = spells_raw.iter()
         .filter_map(|v| v.as_str().map(String::from))
         .collect();
 
     if spell_names.len() < 2 {
-        return Err("Meno di 2 summoner spells trovate".to_string());
+        return Err(format!("Meno di 2 summoner spells: {:?}", spells_raw));
     }
 
-    let id1 = spell_name_to_id(&spell_names[0]).unwrap_or(4);
-    let id2 = spell_name_to_id(&spell_names[1]).unwrap_or(14);
+    let id1 = spell_name_to_id(&spell_names[0])
+        .ok_or_else(|| format!("Spell '{}' non riconosciuta", spell_names[0]))?;
+    let id2 = spell_name_to_id(&spell_names[1])
+        .ok_or_else(|| format!("Spell '{}' non riconosciuta", spell_names[1]))?;
 
-    let payload = json!({
-        "spell1Id": id1,
-        "spell2Id": id2
-    });
+    // Il LCU richiede che il body sia inviato come raw HTTP (non tramite helper .patch)
+    // perché la risposta può essere vuota (204) che causa errore nel .json()
+    let resp = lcu.client
+        .patch(&format!("https://127.0.0.1:{}/lol-champ-select/v1/session/my-selection", lcu.port))
+        .header("Authorization", format!("Basic {}", lcu.auth))
+        .header("Content-Type", "application/json")
+        .json(&json!({ "spell1Id": id1, "spell2Id": id2 }))
+        .send().await
+        .map_err(|e| format!("LCU patch error: {}", e))?;
 
-    lcu.patch("/lol-champ-select/v1/session/my-selection", &payload)
-        .await
-        .ok_or("Impossibile settare summoner spells via LCU")?;
-
-    Ok(spell_names)
+    let status = resp.status().as_u16();
+    if status == 204 || status == 200 {
+        Ok(spell_names)
+    } else {
+        let body = resp.text().await.unwrap_or_default();
+        Err(format!("LCU status {}: {}", status, &body[..body.len().min(200)]))
+    }
 }
 
 // ── Import: Item Set ──────────────────────────────────────────────────────────
