@@ -263,7 +263,13 @@ async fn opgg_get_champion_build(champion_name: &str, position: &str) -> Result<
     })).send().await.map_err(|e| format!("HTTP error: {}", e))?;
 
     let text = res.text().await.map_err(|e| e.to_string())?;
-    eprintln!("[RLP] tools/call raw (800): {:?}", &text[..text.len().min(800)]);
+    // Log in chunks to see full response
+    let mut _off = 0;
+    while _off < text.len() {
+        let _end = (_off + 800).min(text.len());
+        eprintln!("[RLP] raw[{}-{}]: {:?}", _off, _end, &text[_off.._end]);
+        _off = _end;
+    }
 
     // Check for MCP error
     if let Ok(p) = serde_json::from_str::<Value>(&text) {
