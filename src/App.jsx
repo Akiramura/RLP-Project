@@ -19,10 +19,20 @@ export default function App() {
     const [loadingMore, setLoadingMore] = useState(false);
     const matchesInitialized = useRef(false);
 
+    const [seasonFetchDone, setSeasonFetchDone] = useState(false);
+    const seasonFetchRunning = useRef(false);
+
     const [searchQuery, setSearchQuery] = useState("");
     const [searchData, setSearchData] = useState(null);
     const [searching, setSearching] = useState(false);
     const [searchError, setSearchError] = useState(null);
+    const [searchSeasonFetchDone, setSearchSeasonFetchDone] = useState(false);
+    const searchSeasonFetchRunning = useRef(false);
+
+    // Stato per i match extra della search
+    const [searchMatchOffset, setSearchMatchOffset] = useState(0);
+    const [searchExtraMatches, setSearchExtraMatches] = useState([]);
+    const [loadingMoreSearch, setLoadingMoreSearch] = useState(false);
 
     function extractPlayerData(matchDetail, puuid) {
         const info = matchDetail?.info;
@@ -49,7 +59,81 @@ export default function App() {
             visionScore: participant.visionScore,
             goldEarned: participant.goldEarned,
             queueLabel: info.gameMode,
+            gameCreation: info.gameCreation,
         };
+    }
+
+    const SEASON_2026_START = new Date("2026-01-08T00:00:00Z").getTime();
+    const BATCH_DELAY_MS = 2500;
+    const SEASON_FETCH_LIMIT = 20; // max partite da scaricare automaticamente all'avvio
+
+    async function runSeasonFetch({ puuid, startOffset, setMatches, setOffset, setDone, runningRef }) {
+        if (runningRef.current) return;
+        runningRef.current = true;
+
+        let offset = startOffset;
+        let fetched = 0;
+        let keepGoing = true;
+
+        while (keepGoing && runningRef.current && fetched < SEASON_FETCH_LIMIT) {
+            try {
+                const more = await invoke("get_more_matches", { puuid, start: offset });
+
+                if (!more || more.length === 0) break;
+
+                const extracted = more
+                    .map(m => extractPlayerData(m, puuid))
+                    .filter(Boolean);
+
+                const oldestInBatch = extracted.reduce((min, m) =>
+                    m.gameCreation && m.gameCreation < min ? m.gameCreation : min, Infinity
+                );
+
+                if (oldestInBatch < SEASON_2026_START) {
+                    const seasonOnly = extracted.filter(m => !m.gameCreation || m.gameCreation >= SEASON_2026_START);
+                    if (seasonOnly.length > 0) {
+                        setMatches(prev => {
+                            const ids = new Set(prev.map(m => m.matchId));
+                            return [...prev, ...seasonOnly.filter(m => !ids.has(m.matchId))];
+                        });
+                        fetched += seasonOnly.length;
+                    }
+                    keepGoing = false;
+                } else {
+                    setMatches(prev => {
+                        const ids = new Set(prev.map(m => m.matchId));
+                        return [...prev, ...extracted.filter(m => !ids.has(m.matchId))];
+                    });
+                    fetched += extracted.length;
+                    offset += more.length;
+                    if (setOffset) setOffset(offset);
+                }
+
+                await new Promise(r => setTimeout(r, BATCH_DELAY_MS));
+            } catch (e) {
+                const msg = String(e).toLowerCase();
+                if (msg.includes("429") || msg.includes("rate limit")) {
+                    console.warn("Rate limit Riot, attendo 12s...");
+                    await new Promise(r => setTimeout(r, 12000));
+                } else {
+                    console.error("Errore fetch season:", e);
+                    break;
+                }
+            }
+        }
+
+        runningRef.current = false;
+        setDone(true);
+    }
+
+    function fetchSeasonMatches(puuid, startOffset) {
+        return runSeasonFetch({
+            puuid, startOffset,
+            setMatches: setAllMatches,
+            setOffset: setMatchOffset,
+            setDone: setSeasonFetchDone,
+            runningRef: seasonFetchRunning,
+        });
     }
 
     async function fetchData() {
@@ -63,8 +147,12 @@ export default function App() {
                     .map(m => extractPlayerData(m, res.puuid))
                     .filter(Boolean);
                 setAllMatches(extracted);
-                setMatchOffset(res.matches.length);
+                const initialOffset = res.matches.length;
+                setMatchOffset(initialOffset);
                 matchesInitialized.current = true;
+
+                // Avvia fetch automatico di tutta la season in background
+                fetchSeasonMatches(res.puuid, initialOffset);
             }
         } catch (err) {
             console.warn("Chiamata fallita:", err);
@@ -100,6 +188,37 @@ export default function App() {
         }
     }
 
+    async function loadMoreSearchMatches() {
+        if (!searchData?.puuid) return;
+        setLoadingMoreSearch(true);
+        try {
+            const offset = searchMatchOffset === 0 ? 10 : searchMatchOffset;
+            const more = await invoke("get_more_matches", {
+                puuid: searchData.puuid,
+                start: offset,
+            });
+            const extracted = more
+                .map(m => extractPlayerData(m, searchData.puuid))
+                .filter(Boolean);
+            setSearchExtraMatches(prev => [...prev, ...extracted]);
+            setSearchMatchOffset(offset + more.length);
+        } catch (e) {
+            console.error("Errore carica altri search:", e);
+        } finally {
+            setLoadingMoreSearch(false);
+        }
+    }
+
+    function fetchSeasonMatchesForSearch(puuid) {
+        return runSeasonFetch({
+            puuid, startOffset: 10,
+            setMatches: setSearchExtraMatches,
+            setOffset: null,
+            setDone: setSearchSeasonFetchDone,
+            runningRef: searchSeasonFetchRunning,
+        });
+    }
+
     async function handleSearch(e) {
         if (e.key !== "Enter" && e.type !== "click") return;
         const parts = searchQuery.trim().split("#");
@@ -109,12 +228,18 @@ export default function App() {
         }
         setSearching(true);
         setSearchError(null);
+        setSearchExtraMatches([]);
+        setSearchMatchOffset(0);
+        setSearchSeasonFetchDone(false);
+        searchSeasonFetchRunning.current = false;
         try {
             const res = await invoke("search_summoner", {
                 gameName: parts[0],
                 tagLine: parts[1],
             });
             setSearchData(res);
+            // Avvia fetch automatico season in background
+            fetchSeasonMatchesForSearch(res.puuid);
         } catch (err) {
             setSearchError(String(err));
             setSearchData(null);
@@ -127,6 +252,10 @@ export default function App() {
         setSearchData(null);
         setSearchQuery("");
         setSearchError(null);
+        setSearchExtraMatches([]);
+        setSearchMatchOffset(0);
+        setSearchSeasonFetchDone(false);
+        searchSeasonFetchRunning.current = false;
     }
 
     function mapRanked(ranked, queueType) {
@@ -158,9 +287,10 @@ export default function App() {
     const rankedSolo = profileData ? mapRanked(profileData.ranked, "RANKED_SOLO_5x5") : null;
     const rankedFlex = profileData ? mapRanked(profileData.ranked, "RANKED_FLEX_SR") : null;
 
-    const searchMatches = searchData?.matches
-        ?.map(m => extractPlayerData(m, searchData.puuid))
-        ?.filter(Boolean) || [];
+    const searchMatches = [
+        ...(searchData?.matches?.map(m => extractPlayerData(m, searchData.puuid))?.filter(Boolean) || []),
+        ...searchExtraMatches,
+    ];
     const searchRankedSolo = searchData ? mapRankedFromEntries(searchData.ranked_entries, "RANKED_SOLO_5x5") : null;
     const searchRankedFlex = searchData ? mapRankedFromEntries(searchData.ranked_entries, "RANKED_FLEX_SR") : null;
 
@@ -278,7 +408,6 @@ export default function App() {
                             <TrendingUp className="w-4 h-4 mr-2" />
                             Champion Stats
                         </TabsTrigger>
-                        {/* ↓ NUOVO TAB AGGIUNTO ↓ */}
                         <TabsTrigger
                             value="tier-list"
                             className="data-[state=active]:bg-blue-600 data-[state=active]:text-white"
@@ -316,7 +445,18 @@ export default function App() {
 
                     <TabsContent value="matches">
                         {searchData ? (
-                            <MatchHistoryTab matches={searchMatches} />
+                            <div className="space-y-4">
+                                <MatchHistoryTab matches={searchMatches} />
+                                <div className="flex justify-center pt-2 pb-6">
+                                    <Button
+                                        onClick={loadMoreSearchMatches}
+                                        disabled={loadingMoreSearch}
+                                        className="bg-slate-700 hover:bg-slate-600 text-white px-10"
+                                    >
+                                        {loadingMoreSearch ? "Caricamento..." : "Carica altri 5"}
+                                    </Button>
+                                </div>
+                            </div>
                         ) : profileData ? (
                             <div className="space-y-4">
                                 <MatchHistoryTab matches={allMatches} />
@@ -345,10 +485,10 @@ export default function App() {
                         <ChampionMetaTab
                             matches={activeMatches}
                             profile={activeProfile}
+                            seasonFetchDone={searchData ? searchSeasonFetchDone : seasonFetchDone}
                         />
                     </TabsContent>
 
-                    {/* ↓ NUOVO CONTENT AGGIUNTO ↓ */}
                     <TabsContent value="tier-list">
                         <MetaTab />
                     </TabsContent>
