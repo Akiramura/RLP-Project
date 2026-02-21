@@ -66,7 +66,13 @@ export default function App() {
         return () => clearInterval(champSelectPollRef.current);
     }, []);
 
+    // Gestisce sia il formato Riot API (matchDetail + puuid) che il formato OP.GG (oggetto già normalizzato)
     function extractPlayerData(matchDetail, puuid) {
+        // Formato OP.GG: già normalizzato da get_opgg_matches, ha championName direttamente
+        if (matchDetail?.championName !== undefined && matchDetail?.kills !== undefined) {
+            return matchDetail;
+        }
+        // Formato Riot API: ha info.participants[]
         const info = matchDetail?.info;
         if (!info) return null;
         const participant = info.participants?.find(p => p.puuid === puuid);
@@ -81,13 +87,10 @@ export default function App() {
             assists: participant.assists,
             totalMinionsKilled: (participant.totalMinionsKilled || 0) + (participant.neutralMinionsKilled || 0),
             gameDuration: info.gameDuration,
-            item0: participant.item0,
-            item1: participant.item1,
-            item2: participant.item2,
-            item3: participant.item3,
-            item4: participant.item4,
-            item5: participant.item5,
-            item6: participant.item6,
+            items: [participant.item0, participant.item1, participant.item2,
+            participant.item3, participant.item4, participant.item5, participant.item6],
+            item0: participant.item0, item1: participant.item1, item2: participant.item2,
+            item3: participant.item3, item4: participant.item4, item5: participant.item5, item6: participant.item6,
             visionScore: participant.visionScore,
             goldEarned: participant.goldEarned,
             queueLabel: info.gameMode,
@@ -174,20 +177,39 @@ export default function App() {
             setProfileData(res);
             setError(null);
 
-            if (res?.matches && (!matchesInitialized.current || lastLoadedPuuid.current !== res.puuid)) {
-                const extracted = res.matches
-                    .map(m => extractPlayerData(m, res.puuid))
-                    .filter(Boolean);
-                setAllMatches(extracted);
-                const initialOffset = res.matches.length;
-                setMatchOffset(initialOffset);
+            if (!matchesInitialized.current || lastLoadedPuuid.current !== res.puuid) {
                 matchesInitialized.current = true;
                 lastLoadedPuuid.current = res.puuid;
-                // Reset season fetch state for new account
                 seasonFetchRunning.current = false;
                 setSeasonFetchDone(false);
-                // Avvia fetch automatico di tutta la season in background
-                fetchSeasonMatches(res.puuid, initialOffset);
+
+                // Prova prima OP.GG (più veloce, niente rate limit Riot)
+                try {
+                    const summonerId = `${res.profile?.gameName}#${res.profile?.tagLine}`;
+                    const opggMatches = await invoke("get_opgg_matches", {
+                        summonerId, region: "euw", limit: 20
+                    });
+                    if (opggMatches && opggMatches.length > 0) {
+                        setAllMatches(opggMatches);
+                        setMatchOffset(opggMatches.length);
+                        setSeasonFetchDone(true);
+                        console.log(`[OP.GG] ${opggMatches.length} partite caricate`);
+                        return; // Evita il fetch Riot API
+                    }
+                } catch (opggErr) {
+                    console.warn("[OP.GG] Fallback a Riot API:", opggErr);
+                }
+
+                // Fallback: Riot API
+                if (res?.matches) {
+                    const extracted = res.matches
+                        .map(m => extractPlayerData(m, res.puuid))
+                        .filter(Boolean);
+                    setAllMatches(extracted);
+                    const initialOffset = res.matches.length;
+                    setMatchOffset(initialOffset);
+                    fetchSeasonMatches(res.puuid, initialOffset);
+                }
             }
         } catch (err) {
             console.warn("Chiamata fallita:", err);
@@ -273,7 +295,25 @@ export default function App() {
                 tagLine: parts[1],
             });
             setSearchData(res);
-            // Avvia fetch automatico season in background
+
+            // Prova OP.GG per i match della ricerca
+            try {
+                const summonerId = `${parts[0]}#${parts[1]}`;
+                const opggMatches = await invoke("get_opgg_matches", {
+                    summonerId, region: "euw", limit: 20
+                });
+                if (opggMatches && opggMatches.length > 0) {
+                    setSearchExtraMatches(opggMatches);
+                    setSearchMatchOffset(opggMatches.length);
+                    setSearchSeasonFetchDone(true);
+                    console.log(`[OP.GG search] ${opggMatches.length} partite`);
+                    return;
+                }
+            } catch (opggErr) {
+                console.warn("[OP.GG search] Fallback a Riot API:", opggErr);
+            }
+
+            // Fallback: season fetch Riot API
             fetchSeasonMatchesForSearch(res.puuid);
         } catch (err) {
             setSearchError(String(err));

@@ -435,6 +435,107 @@ async fn get_opgg_data(game_name: String, tag_line: String) -> Result<Value, Str
     }))
 }
 
+
+/// Recupera la match history di un summoner tramite OP.GG MCP.
+/// Molto più veloce della Riot API: una sola chiamata invece di N+1.
+/// Restituisce un array di match già parsati pronti per il frontend.
+#[tauri::command]
+async fn get_opgg_matches(summoner_id: String, region: String, limit: Option<u32>) -> Result<Value, String> {
+    let client = Client::builder()
+        .danger_accept_invalid_certs(true)
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        .build().unwrap();
+
+    let limit = limit.unwrap_or(20);
+    let region = if region.is_empty() { "euw".to_string() } else { region.to_lowercase() };
+
+    eprintln!("[get_opgg_matches] summoner={} region={} limit={}", summoner_id, region, limit);
+
+    let result = call_opgg_tool("lol_list_summoner_matches", json!({
+        "summoner_id": summoner_id,
+        "region": region,
+        "game_type": "total",
+        "limit": limit,
+        "desired_output_fields": [
+            "data[].{game_id,champion_id,position,is_win,kill,death,assist,cs,cs_per_min,gold,game_length_second,created_at}",
+            "data[].tier_info.{tier,division,lp}",
+            "data[].items[].id",
+            "data[].summoner_spells[].id"
+        ]
+    }), &client).await?;
+
+    eprintln!("[get_opgg_matches] risposta grezza: {}", result.to_string().get(..300.min(result.to_string().len())).unwrap_or(""));
+
+    // La risposta ha struttura: { "data": [...] } oppure è già un array
+    let matches_arr = if let Some(arr) = result["data"].as_array() {
+        arr.clone()
+    } else if result.is_array() {
+        result.as_array().unwrap().clone()
+    } else {
+        return Err(format!("Struttura risposta OP.GG inattesa: {}", &result.to_string()[..200.min(result.to_string().len())]));
+    };
+
+    // Normalizza ogni match nel formato atteso dal frontend
+    let normalized: Vec<Value> = matches_arr.iter().map(|m| {
+        let items: Vec<Value> = m["items"].as_array()
+            .map(|arr| arr.iter().filter_map(|i| i["id"].as_u64()).map(|id| json!(id)).collect())
+            .unwrap_or_default();
+
+        let spells: Vec<Value> = m["summoner_spells"].as_array()
+            .map(|arr| arr.iter().filter_map(|s| s["id"].as_u64()).map(|id| json!(id)).collect())
+            .unwrap_or_default();
+
+        let game_id = m["game_id"].as_str().unwrap_or("").to_string();
+        let champ   = m["champion_id"].as_str().unwrap_or("Unknown").to_string();
+        let pos     = m["position"].as_str().unwrap_or("").to_string();
+        let win     = m["is_win"].as_bool().unwrap_or(false);
+        let kills   = m["kill"].as_u64().unwrap_or(0);
+        let deaths  = m["death"].as_u64().unwrap_or(0);
+        let assists = m["assist"].as_u64().unwrap_or(0);
+        let cs      = m["cs"].as_u64().unwrap_or(0);
+        let cs_pm   = m["cs_per_min"].as_f64().unwrap_or(0.0);
+        let gold    = m["gold"].as_u64().unwrap_or(0);
+        let duration = m["game_length_second"].as_u64().unwrap_or(0);
+        let created = m["created_at"].as_str().unwrap_or("").to_string();
+
+        let tier = m.pointer("/tier_info/tier").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let div  = m.pointer("/tier_info/division").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let lp   = m.pointer("/tier_info/lp").and_then(|v| v.as_u64()).unwrap_or(0);
+
+        json!({
+            "matchId":            game_id,
+            "championName":       champ,
+            "position":           pos,
+            "win":                win,
+            "kills":              kills,
+            "deaths":             deaths,
+            "assists":            assists,
+            "totalMinionsKilled": cs,
+            "csPerMin":           cs_pm,
+            "goldEarned":         gold,
+            "gameDuration":       duration,
+            "gameCreation":       created,
+            "items":              items,
+            "summonerSpells":     spells,
+            "tier":               tier,
+            "division":           div,
+            "lp":                 lp,
+            "queueLabel":         "Ranked",
+            // Slot singoli per compatibilità con il vecchio formato
+            "item0": items.get(0).and_then(|v| v.as_u64()).unwrap_or(0),
+            "item1": items.get(1).and_then(|v| v.as_u64()).unwrap_or(0),
+            "item2": items.get(2).and_then(|v| v.as_u64()).unwrap_or(0),
+            "item3": items.get(3).and_then(|v| v.as_u64()).unwrap_or(0),
+            "item4": items.get(4).and_then(|v| v.as_u64()).unwrap_or(0),
+            "item5": items.get(5).and_then(|v| v.as_u64()).unwrap_or(0),
+            "item6": items.get(6).and_then(|v| v.as_u64()).unwrap_or(0),
+        })
+    }).collect();
+
+    eprintln!("[get_opgg_matches] {} partite normalizzate", normalized.len());
+    Ok(json!(normalized))
+}
+
 #[tauri::command]
 async fn list_opgg_tools() -> Result<Value, String> {
     let client = Client::builder()
@@ -791,7 +892,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_profiles, get_more_matches, search_summoner, get_opgg_data,
             get_champ_select_session, auto_import_build, list_opgg_tools,
-            debug_champ_select_slot, get_tier_list
+            debug_champ_select_slot, get_tier_list, get_opgg_matches
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
