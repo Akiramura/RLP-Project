@@ -1,8 +1,7 @@
 import { Card } from "./ui/card";
 import { Clock, TrendingUp, ChevronDown, ChevronUp } from "lucide-react";
 import { useState } from "react";
-
-const PATCH = "16.4.1";
+import { PATCH } from "./constants";
 
 const POSITION_ICON = {
     top: "🛡️", jungle: "🌲", mid: "✨",
@@ -87,16 +86,148 @@ function SpellRow({ spells }) {
     );
 }
 
-function MatchCard({ match }) {
+function TeamsPanel({ participants, myTeamId, myPuuid, mySummonerName, onPlayerClick }) {
+    if (!participants?.length) return null;
+
+    function isCurrentPlayer(p) {
+        if (p.isMe === true) return true;
+        if (myPuuid && p.puuid === myPuuid) return true;
+        if (!mySummonerName) return false;
+        const name = mySummonerName.toLowerCase();
+        return (
+            p.summonerName?.toLowerCase() === name ||
+            p.riotIdGameName?.toLowerCase() === name
+        );
+    }
+
+    // Determina i due team: usa teamId se disponibile, altrimenti split 5/5
+    const teamIds = [...new Set(participants.map(p => p.teamId).filter(id => id != null))];
+    let myTeam, enemies;
+    if (teamIds.length >= 2) {
+        const sorted = [...teamIds].sort();
+        const meParticipant = participants.find(p => isCurrentPlayer(p));
+        const myId = myTeamId ?? meParticipant?.teamId ?? sorted[0];
+        myTeam = participants.filter(p => p.teamId === myId);
+        enemies = participants.filter(p => p.teamId !== myId);
+    } else {
+        myTeam = participants.slice(0, 5);
+        enemies = participants.slice(5);
+    }
+
+    function PlayerRow({ p }) {
+        const isMe = isCurrentPlayer(p);
+        const displayName = p.riotIdGameName ?? p.summonerName ?? p.championName;
+        const kda = p.deaths === 0 ? "Perf" : ((p.kills + p.assists) / p.deaths).toFixed(1);
+        const clickable = !isMe && onPlayerClick && (p.riotIdGameName || p.summonerName);
+        const handleClick = () => {
+            if (!clickable) return;
+            const name = p.riotIdGameName ?? p.summonerName;
+            // Usa riotIdTagline se disponibile, altrimenti cerca il # già nel nome, altrimenti EUW
+            const tag = p.riotIdTagline || null;
+            const summonerId = tag
+                ? `${name}#${tag}`
+                : name.includes("#") ? name : `${name}#EUW`;
+            onPlayerClick(summonerId);
+        };
+        return (
+            <div
+                onClick={clickable ? handleClick : undefined}
+                className={`flex items-center gap-2 py-1 px-2 rounded-md transition-colors
+                    ${isMe ? "bg-blue-900/30 border border-blue-800/50" : ""}
+                    ${clickable ? "cursor-pointer hover:bg-slate-700/70 hover:border hover:border-slate-600/50" : "hover:bg-slate-800/50"}
+                `}
+            >
+                <img
+                    src={championIconUrl(p.championName)}
+                    alt={p.championName}
+                    className="w-7 h-7 rounded object-cover bg-slate-800 shrink-0"
+                    onError={e => { e.target.style.display = "none"; }}
+                />
+                <span className={`text-xs truncate w-28 ${isMe ? "text-blue-200 font-semibold" : clickable ? "text-slate-200 group-hover:text-white" : "text-slate-300"}`}>
+                    {displayName}
+                    {clickable && <span className="ml-1 text-slate-500 text-xs">↗</span>}
+                </span>
+                <span className="text-xs text-slate-500 tabular-nums ml-auto shrink-0">
+                    {p.kills}/{p.deaths}/{p.assists}
+                </span>
+                <span className="text-xs w-10 text-right shrink-0 tabular-nums text-slate-400">
+                    {kda}
+                </span>
+            </div>
+        );
+    }
+
+    return (
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-2">
+            {/* Team alleato */}
+            <div>
+                <p className="text-xs font-semibold text-blue-400 uppercase tracking-wider mb-1 px-2">
+                    Il tuo team
+                </p>
+                <div className="space-y-0.5">
+                    {myTeam.map((p, i) => <PlayerRow key={i} p={p} />)}
+                </div>
+            </div>
+            {/* Team nemico */}
+            <div>
+                <p className="text-xs font-semibold text-red-400 uppercase tracking-wider mb-1 px-2">
+                    Avversari
+                </p>
+                <div className="space-y-0.5">
+                    {enemies.map((p, i) => <PlayerRow key={i} p={p} />)}
+                </div>
+            </div>
+        </div>
+    );
+}
+
+function MatchCard({ match, myPuuid, mySummonerName, onPlayerClick }) {
     const [open, setOpen] = useState(false);
-    const won = match.win;
 
-    // Unifica items: supporta sia items[] (OP.GG) che item0-item6 (Riot API)
-    const items = match.items?.length > 0
-        ? match.items
-        : [match.item0, match.item1, match.item2, match.item3, match.item4, match.item5, match.item6];
+    const info = match.info ?? match;
+    const participants = info.participants ?? [];
 
-    const posIcon = POSITION_ICON[match.position?.toLowerCase()] ?? "";
+    // Identifica il giocatore: PUUID prima (affidabile), poi nome (fallback)
+    const me = participants.find(p =>
+        p.isMe === true ||
+        (myPuuid && p.puuid === myPuuid) ||
+        (mySummonerName && (
+            p.summonerName?.toLowerCase() === mySummonerName.toLowerCase() ||
+            p.riotIdGameName?.toLowerCase() === mySummonerName.toLowerCase()
+        ))
+    ) ?? participants[0];
+
+    const won = me?.win ?? match.win ?? false;
+
+    // Items dal participant trovato, oppure dalla struttura flat
+    const items = me
+        ? [me.item0, me.item1, me.item2, me.item3, me.item4, me.item5, me.item6]
+        : match.items?.length > 0
+            ? match.items
+            : [match.item0, match.item1, match.item2, match.item3, match.item4, match.item5, match.item6];
+
+    // Campi principali: preferisce il participant "me", fallback su match flat
+    const championName = me?.championName ?? match.championName;
+    const champLevel = me?.champLevel ?? match.champLevel;
+    const kills = me?.kills ?? match.kills ?? 0;
+    const deaths = me?.deaths ?? match.deaths ?? 0;
+    const assists = me?.assists ?? match.assists ?? 0;
+    const totalMinionsKilled = me?.totalMinionsKilled ?? match.totalMinionsKilled ?? 0;
+    const goldEarned = me?.goldEarned ?? match.goldEarned ?? 0;
+    const visionScore = me?.visionScore ?? match.visionScore;
+    const summonerSpells = me
+        ? [me.summoner1Id, me.summoner2Id].filter(Boolean)
+        : match.summonerSpells ?? [];
+    const gameDuration = info.gameDuration ?? match.gameDuration;
+    const gameCreation = info.gameCreation ?? match.gameCreation;
+    const csPerMin = gameDuration > 0
+        ? ((totalMinionsKilled / gameDuration) * 60).toFixed(1)
+        : match.csPerMin ?? 0;
+    const myTeamId = me?.teamId ?? match.teamId;
+
+    const posIcon = POSITION_ICON[
+        (me?.teamPosition ?? me?.individualPosition ?? match.position ?? "").toLowerCase()
+    ] ?? "";
 
     return (
         <Card className={`border-l-4 ${won ? "border-l-green-500" : "border-l-red-500"} bg-slate-900 overflow-hidden`}>
@@ -106,11 +237,11 @@ function MatchCard({ match }) {
             >
                 {/* Champion */}
                 <div className="relative shrink-0">
-                    <img src={championIconUrl(match.championName)} alt={match.championName}
+                    <img src={championIconUrl(championName)} alt={championName}
                         className="w-12 h-12 rounded-lg object-cover bg-slate-800"
                         onError={e => { e.target.style.display = "none"; }} />
-                    {match.champLevel && (
-                        <div className="absolute -bottom-1 -right-1 bg-slate-700 text-white text-xs px-1 rounded leading-tight">{match.champLevel}</div>
+                    {champLevel && (
+                        <div className="absolute -bottom-1 -right-1 bg-slate-700 text-white text-xs px-1 rounded leading-tight">{champLevel}</div>
                     )}
                     {posIcon && (
                         <div className="absolute -top-1 -left-1 text-xs leading-none">{posIcon}</div>
@@ -123,30 +254,30 @@ function MatchCard({ match }) {
                         {won ? "Vittoria" : "Sconfitta"}
                     </p>
                     <p className="text-slate-500 text-xs flex items-center gap-1 mt-0.5">
-                        <Clock className="w-3 h-3" />{formatDuration(match.gameDuration)}
+                        <Clock className="w-3 h-3" />{formatDuration(gameDuration)}
                     </p>
-                    {match.gameCreation && (
-                        <p className="text-slate-600 text-xs">{formatDate(match.gameCreation)}</p>
+                    {gameCreation && (
+                        <p className="text-slate-600 text-xs">{formatDate(gameCreation)}</p>
                     )}
                 </div>
 
                 {/* Champion name + spells */}
                 <div className="w-24 shrink-0 hidden sm:block">
-                    <p className="text-white text-xs font-medium truncate">{match.championName}</p>
-                    <SpellRow spells={match.summonerSpells} />
+                    <p className="text-white text-xs font-medium truncate">{championName}</p>
+                    <SpellRow spells={summonerSpells} />
                 </div>
 
                 {/* KDA */}
-                <KdaBar kills={match.kills} deaths={match.deaths} assists={match.assists} />
+                <KdaBar kills={kills} deaths={deaths} assists={assists} />
 
                 {/* CS */}
                 <div className="w-20 shrink-0 hidden md:block text-xs text-slate-400">
                     <p>
-                        {match.totalMinionsKilled} CS
-                        {match.csPerMin > 0 && <span className="text-slate-500"> ({match.csPerMin}/m)</span>}
+                        {totalMinionsKilled} CS
+                        {csPerMin > 0 && <span className="text-slate-500"> ({csPerMin}/m)</span>}
                     </p>
-                    {match.goldEarned > 0 && (
-                        <p className="text-yellow-600">{(match.goldEarned / 1000).toFixed(1)}k gold</p>
+                    {goldEarned > 0 && (
+                        <p className="text-yellow-600">{(goldEarned / 1000).toFixed(1)}k gold</p>
                     )}
                 </div>
 
@@ -155,7 +286,7 @@ function MatchCard({ match }) {
                     <ItemRow items={items} />
                 </div>
 
-                {/* Rank LP (OP.GG) */}
+                {/* Rank LP (OP.GG flat structure) */}
                 {match.tier && (
                     <div className="shrink-0 text-right hidden xl:block">
                         <p className="text-xs text-slate-300 font-medium">{match.tier} {match.division}</p>
@@ -163,11 +294,11 @@ function MatchCard({ match }) {
                     </div>
                 )}
 
-                {/* Vision score (Riot API) */}
-                {match.visionScore !== undefined && (
+                {/* Vision score */}
+                {visionScore !== undefined && (
                     <div className="ml-auto text-right shrink-0 hidden sm:block">
                         <p className="text-slate-400 text-xs flex items-center gap-1">
-                            <TrendingUp className="w-3 h-3" />{match.visionScore} vis
+                            <TrendingUp className="w-3 h-3" />{visionScore} vis
                         </p>
                     </div>
                 )}
@@ -179,26 +310,56 @@ function MatchCard({ match }) {
 
             {/* Expanded */}
             {open && (
-                <div className="px-3 pb-3 pt-1 border-t border-slate-800 space-y-2">
+                <div className="px-3 pb-3 pt-1 border-t border-slate-800 space-y-3">
                     <div className="lg:hidden">
                         <p className="text-slate-500 text-xs mb-1">Items</p>
                         <ItemRow items={items} />
                     </div>
                     <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-slate-400">
-                        <span>{match.totalMinionsKilled} CS{match.csPerMin > 0 ? ` (${match.csPerMin}/m)` : ""}</span>
-                        {match.goldEarned > 0 && <span className="text-yellow-600">{(match.goldEarned / 1000).toFixed(1)}k gold</span>}
-                        {match.visionScore !== undefined && <span>{match.visionScore} vision</span>}
+                        <span>{totalMinionsKilled} CS{csPerMin > 0 ? ` (${csPerMin}/m)` : ""}</span>
+                        {goldEarned > 0 && <span className="text-yellow-600">{(goldEarned / 1000).toFixed(1)}k gold</span>}
+                        {visionScore !== undefined && <span>{visionScore} vision</span>}
                         {match.tier && <span className="text-slate-300">{match.tier} {match.division} • {match.lp} LP</span>}
                         {match.queueLabel && <span>{match.queueLabel}</span>}
-                        {match.matchId && <span className="text-slate-600 font-mono text-xs">#{match.matchId.toString().slice(-8)}</span>}
+                        {(match.metadata?.matchId ?? match.matchId) && (
+                            <span className="text-slate-600 font-mono text-xs">
+                                #{(match.metadata?.matchId ?? match.matchId).toString().slice(-8)}
+                            </span>
+                        )}
                     </div>
+                    <TeamsPanel
+                        participants={participants}
+                        myTeamId={myTeamId}
+                        myPuuid={myPuuid}
+                        mySummonerName={mySummonerName}
+                        onPlayerClick={onPlayerClick}
+                    />
                 </div>
             )}
         </Card>
     );
 }
 
-export function MatchHistoryTab({ matches }) {
+// Estrae i dati del giocatore corrente da un match (struttura Riot API o flat)
+export function resolveMe(match, myPuuid, mySummonerName) {
+    const participants = match.info?.participants ?? match.participants ?? [];
+    const me = participants.find(p =>
+        p.isMe === true ||
+        (myPuuid && p.puuid === myPuuid) ||
+        (mySummonerName && (
+            p.summonerName?.toLowerCase() === mySummonerName.toLowerCase() ||
+            p.riotIdGameName?.toLowerCase() === mySummonerName.toLowerCase()
+        ))
+    ) ?? participants[0];
+    if (!me) return match;
+    return {
+        ...me,
+        gameDuration: match.info?.gameDuration ?? match.gameDuration,
+        gameCreation: match.info?.gameCreation ?? match.gameCreation,
+    };
+}
+
+export function MatchHistoryTab({ matches, myPuuid, mySummonerName, onPlayerClick }) {
     if (!matches || matches.length === 0) {
         return (
             <div className="flex items-center justify-center h-64">
@@ -207,17 +368,18 @@ export function MatchHistoryTab({ matches }) {
         );
     }
 
-    const wins = matches.filter(m => m.win).length;
+    const resolved = matches.map(m => resolveMe(m, myPuuid, mySummonerName));
+
+    const wins = resolved.filter(m => m.win).length;
     const losses = matches.length - wins;
     const wr = Math.round((wins / matches.length) * 100);
-    const validKda = matches.filter(m => m.deaths > 0);
+    const validKda = resolved.filter(m => m.deaths > 0);
     const avgKda = validKda.length
         ? (validKda.reduce((s, m) => s + (m.kills + m.assists) / m.deaths, 0) / validKda.length).toFixed(2)
         : "Perfect";
 
     return (
         <div className="space-y-3">
-            {/* Summary bar */}
             <div className="flex items-center gap-5 p-3 bg-slate-900 rounded-xl border border-slate-800 text-sm flex-wrap">
                 <span className="text-slate-400">{matches.length} partite</span>
                 <span>
@@ -232,7 +394,13 @@ export function MatchHistoryTab({ matches }) {
             </div>
 
             {matches.map((match, i) => (
-                <MatchCard key={match.matchId ?? i} match={match} />
+                <MatchCard
+                    key={match.metadata?.matchId ?? match.matchId ?? i}
+                    match={match}
+                    myPuuid={myPuuid}
+                    mySummonerName={mySummonerName}
+                    onPlayerClick={onPlayerClick}
+                />
             ))}
         </div>
     );

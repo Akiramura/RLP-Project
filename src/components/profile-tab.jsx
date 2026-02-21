@@ -2,10 +2,10 @@ import { Card } from "./ui/card";
 import { Badge } from "./ui/badge";
 import { Progress } from "./ui/progress";
 import { Trophy, Swords, Eye, Coins } from "lucide-react";
+import { PATCH } from "./constants";
+import { resolveMe } from "./match-history-tab";
 
-const PATCH = "16.4.1";
-
-export function ProfileTab({ profile, rankedSolo, rankedFlex, matches }) {
+export function ProfileTab({ profile, rankedSolo, rankedFlex, matches, myPuuid, mySummonerName }) {
     if (!profile) return null;
 
     const level = profile.summonerLevel || 0;
@@ -17,12 +17,10 @@ export function ProfileTab({ profile, rankedSolo, rankedFlex, matches }) {
     const xpTotal = profile.xpUntilNextLevel || 1;
     const xpPercent = Math.round((xpCurrent / xpTotal) * 100);
 
-    const soloWR = rankedSolo
-        ? ((rankedSolo.wins / (rankedSolo.wins + rankedSolo.losses)) * 100).toFixed(1)
-        : 0;
-    const flexWR = rankedFlex
-        ? ((rankedFlex.wins / (rankedFlex.wins + rankedFlex.losses)) * 100).toFixed(1)
-        : 0;
+    const soloTotal = rankedSolo ? (rankedSolo.wins + rankedSolo.losses) : 0;
+    const flexTotal = rankedFlex ? (rankedFlex.wins + rankedFlex.losses) : 0;
+    const soloWR = soloTotal > 0 ? ((rankedSolo.wins / soloTotal) * 100).toFixed(1) : 0;
+    const flexWR = flexTotal > 0 ? ((rankedFlex.wins / flexTotal) * 100).toFixed(1) : 0;
 
     const tierColors = {
         IRON: "from-slate-500 to-slate-400",
@@ -44,16 +42,17 @@ export function ProfileTab({ profile, rankedSolo, rankedFlex, matches }) {
     const champStats = {};
     if (matches && matches.length > 0) {
         matches.forEach(m => {
-            if (!m?.championName) return;
-            const name = m.championName;
+            const r = resolveMe(m, myPuuid, mySummonerName);
+            if (!r?.championName) return;
+            const name = r.championName;
             if (!champStats[name]) {
                 champStats[name] = { games: 0, wins: 0, kills: 0, deaths: 0, assists: 0 };
             }
             champStats[name].games += 1;
-            champStats[name].wins += m.win ? 1 : 0;
-            champStats[name].kills += m.kills || 0;
-            champStats[name].deaths += m.deaths || 0;
-            champStats[name].assists += m.assists || 0;
+            champStats[name].wins += r.win ? 1 : 0;
+            champStats[name].kills += r.kills || 0;
+            champStats[name].deaths += r.deaths || 0;
+            champStats[name].assists += r.assists || 0;
         });
     }
 
@@ -71,11 +70,14 @@ export function ProfileTab({ profile, rankedSolo, rankedFlex, matches }) {
 
     // --- Calcola Performance Stats dai match reali ---
     const perfStats = matches && matches.length > 0 ? (() => {
-        const totals = matches.reduce((acc, m) => ({
-            kills: acc.kills + (m.kills || 0),
-            deaths: acc.deaths + (m.deaths || 0),
-            assists: acc.assists + (m.assists || 0),
-        }), { kills: 0, deaths: 0, assists: 0 });
+        const totals = matches.reduce((acc, m) => {
+            const r = resolveMe(m, myPuuid, mySummonerName);
+            return {
+                kills: acc.kills + (r.kills || 0),
+                deaths: acc.deaths + (r.deaths || 0),
+                assists: acc.assists + (r.assists || 0),
+            };
+        }, { kills: 0, deaths: 0, assists: 0 });
 
         const avgKills = (totals.kills / matches.length).toFixed(1);
         const avgDeaths = (totals.deaths / matches.length).toFixed(1);

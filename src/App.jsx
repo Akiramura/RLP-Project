@@ -116,7 +116,8 @@ export default function App() {
 
                 if (!more || more.length === 0) break;
 
-                const extracted = more
+                const rawMatches = more.filter(m => m?.metadata || m?.info);
+                const extracted = rawMatches
                     .map(m => extractPlayerData(m, puuid))
                     .filter(Boolean);
 
@@ -125,21 +126,24 @@ export default function App() {
                 );
 
                 if (oldestInBatch < SEASON_2026_START) {
-                    const seasonOnly = extracted.filter(m => !m.gameCreation || m.gameCreation >= SEASON_2026_START);
+                    const seasonOnly = rawMatches.filter(m => {
+                        const gc = m?.info?.gameCreation ?? m?.gameCreation;
+                        return !gc || gc >= SEASON_2026_START;
+                    });
                     if (seasonOnly.length > 0) {
                         setMatches(prev => {
-                            const ids = new Set(prev.map(m => m.matchId));
-                            return [...prev, ...seasonOnly.filter(m => !ids.has(m.matchId))];
+                            const ids = new Set(prev.map(m => m?.metadata?.matchId ?? m?.matchId));
+                            return [...prev, ...seasonOnly.filter(m => !ids.has(m?.metadata?.matchId ?? m?.matchId))];
                         });
                         fetched += seasonOnly.length;
                     }
                     keepGoing = false;
                 } else {
                     setMatches(prev => {
-                        const ids = new Set(prev.map(m => m.matchId));
-                        return [...prev, ...extracted.filter(m => !ids.has(m.matchId))];
+                        const ids = new Set(prev.map(m => m?.metadata?.matchId ?? m?.matchId));
+                        return [...prev, ...rawMatches.filter(m => !ids.has(m?.metadata?.matchId ?? m?.matchId))];
                     });
-                    fetched += extracted.length;
+                    fetched += rawMatches.length;
                     offset += more.length;
                     if (setOffset) setOffset(offset);
                 }
@@ -200,12 +204,9 @@ export default function App() {
                     console.warn("[OP.GG] Fallback a Riot API:", opggErr);
                 }
 
-                // Fallback: Riot API
+                // Fallback: Riot API — conserva i match raw (con info.participants)
                 if (res?.matches) {
-                    const extracted = res.matches
-                        .map(m => extractPlayerData(m, res.puuid))
-                        .filter(Boolean);
-                    setAllMatches(extracted);
+                    setAllMatches(res.matches.filter(m => m?.metadata || m?.info));
                     const initialOffset = res.matches.length;
                     setMatchOffset(initialOffset);
                     fetchSeasonMatches(res.puuid, initialOffset);
@@ -233,10 +234,8 @@ export default function App() {
                 puuid: profileData.puuid,
                 start: matchOffset,
             });
-            const extracted = more
-                .map(m => extractPlayerData(m, profileData.puuid))
-                .filter(Boolean);
-            setAllMatches(prev => [...prev, ...extracted]);
+            const raw = more.filter(m => m?.metadata || m?.info);
+            setAllMatches(prev => [...prev, ...raw]);
             setMatchOffset(prev => prev + more.length);
         } catch (e) {
             console.error("Errore carica altri:", e);
@@ -254,10 +253,8 @@ export default function App() {
                 puuid: searchData.puuid,
                 start: offset,
             });
-            const extracted = more
-                .map(m => extractPlayerData(m, searchData.puuid))
-                .filter(Boolean);
-            setSearchExtraMatches(prev => [...prev, ...extracted]);
+            const raw = more.filter(m => m?.metadata || m?.info);
+            setSearchExtraMatches(prev => [...prev, ...raw]);
             setSearchMatchOffset(offset + more.length);
         } catch (e) {
             console.error("Errore carica altri search:", e);
@@ -276,13 +273,7 @@ export default function App() {
         });
     }
 
-    async function handleSearch(e) {
-        if (e.key !== "Enter" && e.type !== "click") return;
-        const parts = searchQuery.trim().split("#");
-        if (parts.length !== 2 || !parts[0] || !parts[1]) {
-            setSearchError("Formato corretto: NomeSummoner#TAG (es. lolllita#kitty)");
-            return;
-        }
+    async function doSearch(gameName, tagLine) {
         setSearching(true);
         setSearchError(null);
         setSearchExtraMatches([]);
@@ -290,15 +281,12 @@ export default function App() {
         setSearchSeasonFetchDone(false);
         searchSeasonFetchRunning.current = false;
         try {
-            const res = await invoke("search_summoner", {
-                gameName: parts[0],
-                tagLine: parts[1],
-            });
+            const res = await invoke("search_summoner", { gameName: gameName.trim(), tagLine: tagLine.trim() });
             setSearchData(res);
 
             // Prova OP.GG per i match della ricerca
             try {
-                const summonerId = `${parts[0]}#${parts[1]}`;
+                const summonerId = `${gameName}#${tagLine}`;
                 const opggMatches = await invoke("get_opgg_matches", {
                     summonerId, region: "euw", limit: 20
                 });
@@ -321,6 +309,25 @@ export default function App() {
         } finally {
             setSearching(false);
         }
+    }
+
+    async function handleSearch(e) {
+        if (e.key !== "Enter" && e.type !== "click") return;
+        const parts = searchQuery.trim().split("#");
+        if (parts.length !== 2 || !parts[0] || !parts[1]) {
+            setSearchError("Formato corretto: NomeSummoner#TAG (es. lolllita#kitty)");
+            return;
+        }
+        setActiveTab("profile");
+        await doSearch(parts[0], parts[1]);
+    }
+
+    async function handlePlayerClick(summonerId) {
+        const parts = summonerId.trim().split("#");
+        if (parts.length !== 2 || !parts[0] || !parts[1]) return;
+        setSearchQuery(summonerId);
+        setActiveTab("profile");
+        await doSearch(parts[0], parts[1]);
     }
 
     function clearSearch() {
@@ -362,8 +369,13 @@ export default function App() {
     const rankedSolo = profileData ? mapRanked(profileData.ranked, "RANKED_SOLO_5x5") : null;
     const rankedFlex = profileData ? mapRanked(profileData.ranked, "RANKED_FLEX_SR") : null;
 
+    const myPuuid = profileData?.puuid ?? null;
+    const mySummonerName = profileData?.profile?.gameName
+        ? `${profileData.profile.gameName}#${profileData.profile.tagLine}`
+        : null;
+
     const searchMatches = [
-        ...(searchData?.matches?.map(m => extractPlayerData(m, searchData.puuid))?.filter(Boolean) || []),
+        ...(searchData?.matches?.filter(m => m?.metadata || m?.info) || []),
         ...searchExtraMatches,
     ];
     const searchRankedSolo = searchData ? mapRankedFromEntries(searchData.ranked_entries, "RANKED_SOLO_5x5") : null;
@@ -512,6 +524,8 @@ export default function App() {
                                 rankedSolo={searchRankedSolo}
                                 rankedFlex={searchRankedFlex}
                                 matches={searchMatches}
+                                myPuuid={searchData.puuid}
+                                mySummonerName={`${searchData.profile?.gameName}#${searchData.profile?.tagLine}`}
                             />
                         ) : profileData ? (
                             <ProfileTab
@@ -519,6 +533,8 @@ export default function App() {
                                 rankedSolo={rankedSolo}
                                 rankedFlex={rankedFlex}
                                 matches={allMatches}
+                                myPuuid={myPuuid}
+                                mySummonerName={mySummonerName}
                             />
                         ) : (
                             <div className="flex flex-col items-center justify-center h-64">
@@ -534,7 +550,12 @@ export default function App() {
                     <TabsContent value="matches">
                         {searchData ? (
                             <div className="space-y-4">
-                                <MatchHistoryTab matches={searchMatches} />
+                                <MatchHistoryTab
+                                    matches={searchMatches}
+                                    myPuuid={searchData.puuid}
+                                    mySummonerName={`${searchData.profile?.gameName}#${searchData.profile?.tagLine}`}
+                                    onPlayerClick={handlePlayerClick}
+                                />
                                 <div className="flex justify-center pt-2 pb-6">
                                     <Button
                                         onClick={loadMoreSearchMatches}
@@ -547,7 +568,12 @@ export default function App() {
                             </div>
                         ) : profileData ? (
                             <div className="space-y-4">
-                                <MatchHistoryTab matches={allMatches} />
+                                <MatchHistoryTab
+                                    matches={allMatches}
+                                    myPuuid={myPuuid}
+                                    mySummonerName={mySummonerName}
+                                    onPlayerClick={handlePlayerClick}
+                                />
                                 <div className="flex justify-center pt-2 pb-6">
                                     <Button
                                         onClick={loadMoreMatches}
@@ -575,6 +601,10 @@ export default function App() {
                             profile={activeProfile}
                             seasonFetchDone={searchData ? searchSeasonFetchDone : seasonFetchDone}
                             metaData={liveMetaData}
+                            myPuuid={searchData ? searchData.puuid : myPuuid}
+                            mySummonerName={searchData
+                                ? `${searchData.profile?.gameName}#${searchData.profile?.tagLine}`
+                                : mySummonerName}
                         />
                     </TabsContent>
 

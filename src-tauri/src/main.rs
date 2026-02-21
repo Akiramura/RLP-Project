@@ -435,107 +435,6 @@ async fn get_opgg_data(game_name: String, tag_line: String) -> Result<Value, Str
     }))
 }
 
-
-/// Recupera la match history di un summoner tramite OP.GG MCP.
-/// Molto più veloce della Riot API: una sola chiamata invece di N+1.
-/// Restituisce un array di match già parsati pronti per il frontend.
-#[tauri::command]
-async fn get_opgg_matches(summoner_id: String, region: String, limit: Option<u32>) -> Result<Value, String> {
-    let client = Client::builder()
-        .danger_accept_invalid_certs(true)
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-        .build().unwrap();
-
-    let limit = limit.unwrap_or(20);
-    let region = if region.is_empty() { "euw".to_string() } else { region.to_lowercase() };
-
-    eprintln!("[get_opgg_matches] summoner={} region={} limit={}", summoner_id, region, limit);
-
-    let result = call_opgg_tool("lol_list_summoner_matches", json!({
-        "summoner_id": summoner_id,
-        "region": region,
-        "game_type": "total",
-        "limit": limit,
-        "desired_output_fields": [
-            "data[].{game_id,champion_id,position,is_win,kill,death,assist,cs,cs_per_min,gold,game_length_second,created_at}",
-            "data[].tier_info.{tier,division,lp}",
-            "data[].items[].id",
-            "data[].summoner_spells[].id"
-        ]
-    }), &client).await?;
-
-    eprintln!("[get_opgg_matches] risposta grezza: {}", result.to_string().get(..300.min(result.to_string().len())).unwrap_or(""));
-
-    // La risposta ha struttura: { "data": [...] } oppure è già un array
-    let matches_arr = if let Some(arr) = result["data"].as_array() {
-        arr.clone()
-    } else if result.is_array() {
-        result.as_array().unwrap().clone()
-    } else {
-        return Err(format!("Struttura risposta OP.GG inattesa: {}", &result.to_string()[..200.min(result.to_string().len())]));
-    };
-
-    // Normalizza ogni match nel formato atteso dal frontend
-    let normalized: Vec<Value> = matches_arr.iter().map(|m| {
-        let items: Vec<Value> = m["items"].as_array()
-            .map(|arr| arr.iter().filter_map(|i| i["id"].as_u64()).map(|id| json!(id)).collect())
-            .unwrap_or_default();
-
-        let spells: Vec<Value> = m["summoner_spells"].as_array()
-            .map(|arr| arr.iter().filter_map(|s| s["id"].as_u64()).map(|id| json!(id)).collect())
-            .unwrap_or_default();
-
-        let game_id = m["game_id"].as_str().unwrap_or("").to_string();
-        let champ   = m["champion_id"].as_str().unwrap_or("Unknown").to_string();
-        let pos     = m["position"].as_str().unwrap_or("").to_string();
-        let win     = m["is_win"].as_bool().unwrap_or(false);
-        let kills   = m["kill"].as_u64().unwrap_or(0);
-        let deaths  = m["death"].as_u64().unwrap_or(0);
-        let assists = m["assist"].as_u64().unwrap_or(0);
-        let cs      = m["cs"].as_u64().unwrap_or(0);
-        let cs_pm   = m["cs_per_min"].as_f64().unwrap_or(0.0);
-        let gold    = m["gold"].as_u64().unwrap_or(0);
-        let duration = m["game_length_second"].as_u64().unwrap_or(0);
-        let created = m["created_at"].as_str().unwrap_or("").to_string();
-
-        let tier = m.pointer("/tier_info/tier").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let div  = m.pointer("/tier_info/division").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let lp   = m.pointer("/tier_info/lp").and_then(|v| v.as_u64()).unwrap_or(0);
-
-        json!({
-            "matchId":            game_id,
-            "championName":       champ,
-            "position":           pos,
-            "win":                win,
-            "kills":              kills,
-            "deaths":             deaths,
-            "assists":            assists,
-            "totalMinionsKilled": cs,
-            "csPerMin":           cs_pm,
-            "goldEarned":         gold,
-            "gameDuration":       duration,
-            "gameCreation":       created,
-            "items":              items,
-            "summonerSpells":     spells,
-            "tier":               tier,
-            "division":           div,
-            "lp":                 lp,
-            "queueLabel":         "Ranked",
-            // Slot singoli per compatibilità con il vecchio formato
-            "item0": items.get(0).and_then(|v| v.as_u64()).unwrap_or(0),
-            "item1": items.get(1).and_then(|v| v.as_u64()).unwrap_or(0),
-            "item2": items.get(2).and_then(|v| v.as_u64()).unwrap_or(0),
-            "item3": items.get(3).and_then(|v| v.as_u64()).unwrap_or(0),
-            "item4": items.get(4).and_then(|v| v.as_u64()).unwrap_or(0),
-            "item5": items.get(5).and_then(|v| v.as_u64()).unwrap_or(0),
-            "item6": items.get(6).and_then(|v| v.as_u64()).unwrap_or(0),
-        })
-    }).collect();
-
-    eprintln!("[get_opgg_matches] {} partite normalizzate", normalized.len());
-    Ok(json!(normalized))
-}
-
 #[tauri::command]
 async fn list_opgg_tools() -> Result<Value, String> {
     let client = Client::builder()
@@ -803,6 +702,83 @@ fn split_csv(s: &str) -> Vec<String> {
     }
     if !current.is_empty() { result.push(current); }
     result
+}
+
+#[tauri::command]
+async fn get_opgg_matches(summoner_id: String, region: String, limit: u32) -> Result<Value, String> {
+    let client = Client::builder()
+        .danger_accept_invalid_certs(true)
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        .build().unwrap();
+
+    let result = call_opgg_tool("lol_list_summoner_matches", json!({
+        "summoner_id": summoner_id,
+        "region": region,
+        "limit": limit,
+        "desired_output_fields": [
+            "data[].{game_id,created_at,is_win,champion_id,position,kill,death,assist,cs,game_length_second}",
+            "data[].items[].id",
+            "data[].participants[].{summoner_id,champion_id,position,kill,death,assist,is_win,team_key}"
+        ]
+    }), &client).await?;
+
+    // Normalizza in un array di match compatibile con il frontend
+    let empty = vec![];
+    let matches_raw = result["data"].as_array().unwrap_or(&empty);
+
+    let matches: Vec<Value> = matches_raw.iter().map(|m| {
+        let participants: Vec<Value> = m["participants"].as_array().unwrap_or(&empty).iter().map(|p| {
+            let team_key = p["team_key"].as_str().unwrap_or("blue");
+            let raw_id = p["summoner_id"].as_str().unwrap_or("");
+            // OP.GG restituisce summoner_id come "Nome#TAG" — splittiamo
+            let (game_name, tag_line) = if let Some(idx) = raw_id.find('#') {
+                (&raw_id[..idx], &raw_id[idx+1..])
+            } else {
+                (raw_id, "EUW")
+            };
+            json!({
+                "teamId": if team_key == "blue" { 100 } else { 200 },
+                "summonerName": raw_id,
+                "riotIdGameName": game_name,
+                "riotIdTagline": tag_line,
+                "championName": p["champion_id"].as_str().unwrap_or(""),
+                "kills": p["kill"].as_u64().unwrap_or(0),
+                "deaths": p["death"].as_u64().unwrap_or(0),
+                "assists": p["assist"].as_u64().unwrap_or(0),
+                "win": p["is_win"].as_bool().unwrap_or(false),
+                "isMe": raw_id == summoner_id.as_str()
+            })
+        }).collect();
+
+        // Determina teamId del giocatore cercato
+        let my_team_id: u64 = participants.iter()
+            .find(|p| p["isMe"].as_bool().unwrap_or(false))
+            .and_then(|p| p["teamId"].as_u64())
+            .unwrap_or(100);
+
+        let items: Vec<Value> = m["items"].as_array().unwrap_or(&empty).iter()
+            .map(|i| json!(i["id"].as_u64().unwrap_or(0)))
+            .collect();
+
+        json!({
+            "matchId": m["game_id"],
+            "win": m["is_win"].as_bool().unwrap_or(false),
+            "championName": m["champion_id"].as_str().unwrap_or(""),
+            "position": m["position"].as_str().unwrap_or(""),
+            "kills": m["kill"].as_u64().unwrap_or(0),
+            "deaths": m["death"].as_u64().unwrap_or(0),
+            "assists": m["assist"].as_u64().unwrap_or(0),
+            "totalMinionsKilled": m["cs"].as_u64().unwrap_or(0),
+            "gameDuration": m["game_length_second"].as_u64().unwrap_or(0),
+            "gameCreation": m["created_at"],
+            "items": items,
+            "teamId": my_team_id,
+            "participants": participants
+        })
+    }).collect();
+
+    eprintln!("[get_opgg_matches] {} partite restituite per {}", matches.len(), summoner_id);
+    Ok(json!(matches))
 }
 
 #[tauri::command]

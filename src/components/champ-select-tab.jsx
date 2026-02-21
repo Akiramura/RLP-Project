@@ -3,8 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { Card } from "./ui/card";
 import { Badge } from "./ui/badge";
 import { Shield, Zap, Package, CheckCircle, XCircle, Loader2 } from "lucide-react";
+import { PATCH } from "./constants";
 
-const PATCH = "16.4.1";
 
 // Converte i nomi grezzi da OP.GG (es. "Flash", "Heal") nel nome DDragon corretto
 const SPELL_NAME_MAP = {

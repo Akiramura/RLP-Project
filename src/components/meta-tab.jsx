@@ -3,8 +3,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { Card } from "./ui/card";
 import { Badge } from "./ui/badge";
 import { Search, RefreshCw, AlertCircle, Loader2 } from "lucide-react";
+import { Trophy, Target, Zap, TrendingUp } from 'lucide-react';
+import { PATCH } from "./constants";
 
-const PATCH = "16.4.1";
 
 // Mappa champion_id OP.GG → nome DDragon
 function normalizeName(raw) {

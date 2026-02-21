@@ -2,8 +2,8 @@ import { useState, useMemo } from "react";
 import { Card } from "./ui/card";
 import { Badge } from "./ui/badge";
 import { TrendingUp, Swords, Trophy, Target, Zap, AlertTriangle, Filter } from "lucide-react";
-
-const PATCH = "16.4.1";
+import { PATCH } from "./constants";
+import { resolveMe } from "./match-history-tab";
 
 // Patch 14.24 iniziata il 27 Novembre 2024, 14.1 (Season 2025) il 8 Gennaio 2025
 const PATCH_SCHEDULE = [
@@ -230,23 +230,28 @@ function normalizeChampName(name) {
     return name.replace(/['\u2019\s\.]/g, "");
 }
 
-export function ChampionMetaTab({ matches, seasonFetchDone, metaData }) {
+export function ChampionMetaTab({ matches, seasonFetchDone, metaData, myPuuid, mySummonerName }) {
     // Usa metaData prop (dati live da OP.GG) se disponibile, altrimenti fallback su META_DATA statico
     const activeMetaData = (metaData && Object.keys(metaData).length > 0) ? metaData : META_DATA;
     const [filterKey, setFilterKey] = useState("all");
 
+    // Normalizza i match raw in formato flat usando resolveMe
+    const resolvedMatches = useMemo(() => {
+        if (!matches) return [];
+        return matches.map(m => resolveMe(m, myPuuid, mySummonerName)).filter(Boolean);
+    }, [matches, myPuuid, mySummonerName]);
+
     // Filtra i match in base al periodo selezionato
     const filteredMatches = useMemo(() => {
-        if (!matches) return [];
         const opt = FILTER_OPTIONS.find(o => o.key === filterKey);
-        if (!opt || opt.key === "all") return matches;
-        return matches.filter(m => {
+        if (!opt || opt.key === "all") return resolvedMatches;
+        return resolvedMatches.filter(m => {
             const ts = m.gameCreation;
-            if (!ts) return true; // se manca il timestamp, includi
+            if (!ts) return true;
             if (opt.to) return ts >= opt.from && ts <= opt.to;
             return ts >= opt.from;
         });
-    }, [matches, filterKey]);
+    }, [resolvedMatches, filterKey]);
 
     if (!matches || matches.length === 0) {
         return (
@@ -256,6 +261,8 @@ export function ChampionMetaTab({ matches, seasonFetchDone, metaData }) {
             </div>
         );
     }
+
+    if (resolvedMatches.length === 0) return null;
 
     if (filteredMatches.length === 0) {
         return (
