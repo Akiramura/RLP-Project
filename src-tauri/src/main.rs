@@ -164,8 +164,26 @@ async fn db_save_summoner(puuid: &str, profile: &Value, ranked_entries: &Value, 
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-fn get_lockfile_path() -> PathBuf {
-    PathBuf::from(r"C:\Riot Games\League of Legends\lockfile")
+/// Cerca il lockfile di League su tutte le lettere di drive possibili (C→Z).
+fn get_lockfile_path() -> Option<PathBuf> {
+    let suffixes = [
+        r"Riot Games\League of Legends\lockfile",
+        r"Program Files\Riot Games\League of Legends\lockfile",
+        r"Program Files (x86)\Riot Games\League of Legends\lockfile",
+        r"Games\League of Legends\lockfile",
+        r"League of Legends\lockfile",
+    ];
+    for drive in 'C'..='Z' {
+        for suffix in &suffixes {
+            let path = PathBuf::from(format!(r"{}:\{}", drive, suffix));
+            if path.exists() {
+                eprintln!("[RLP] lockfile trovato: {:?}", path);
+                return Some(path);
+            }
+        }
+    }
+    eprintln!("[RLP] lockfile non trovato su nessun drive (C:-Z:)");
+    None
 }
 
 fn get_cache_path(handle: &AppHandle) -> PathBuf {
@@ -268,8 +286,11 @@ async fn call_opgg_tool(tool_name: &str, arguments: Value, client: &Client) -> R
 
 #[tauri::command]
 async fn get_profiles(handle: AppHandle) -> Result<Value, String> {
-    let lock_path = get_lockfile_path();
-    let cache_p   = get_cache_path(&handle);
+    let lock_path  = match get_lockfile_path() {
+        Some(p) => p,
+        None    => return cached_data.ok_or("CLIENT_CLOSED".into()),
+    };
+    let cache_p    = get_cache_path(&handle);
 
     let cached_data: Option<Value> = fs::read_to_string(&cache_p).ok()
         .and_then(|s| serde_json::from_str(&s).ok());

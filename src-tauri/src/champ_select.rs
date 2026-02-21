@@ -123,15 +123,55 @@ pub struct ImportResult {
     pub errors: Vec<String>,
 }
 
-fn get_lockfile_path() -> PathBuf {
-    PathBuf::from(r"C:\Riot Games\League of Legends\lockfile")
+/// Cerca il lockfile di League su tutte le lettere di drive possibili (C→Z).
+fn get_lockfile_path() -> Option<PathBuf> {
+    let suffixes = [
+        r"Riot Games\League of Legends\lockfile",
+        r"Program Files\Riot Games\League of Legends\lockfile",
+        r"Program Files (x86)\Riot Games\League of Legends\lockfile",
+        r"Games\League of Legends\lockfile",
+        r"League of Legends\lockfile",
+    ];
+    for drive in 'C'..='Z' {
+        for suffix in &suffixes {
+            let path = PathBuf::from(format!(r"{}:\{}", drive, suffix));
+            if path.exists() {
+                eprintln!("[RLP] lockfile trovato: {:?}", path);
+                return Some(path);
+            }
+        }
+    }
+    eprintln!("[RLP] lockfile non trovato su nessun drive (C:-Z:)");
+    None
+}
+
+/// Cerca la cartella Config\Champions di League su tutte le lettere di drive (C→Z).
+fn get_league_config_path() -> Option<PathBuf> {
+    let suffixes = [
+        r"Riot Games\League of Legends\Config\Champions",
+        r"Program Files\Riot Games\League of Legends\Config\Champions",
+        r"Program Files (x86)\Riot Games\League of Legends\Config\Champions",
+        r"Games\League of Legends\Config\Champions",
+        r"League of Legends\Config\Champions",
+    ];
+    for drive in 'C'..='Z' {
+        for suffix in &suffixes {
+            let path = PathBuf::from(format!(r"{}:\{}", drive, suffix));
+            if path.exists() {
+                eprintln!("[RLP] config path trovato: {:?}", path);
+                return Some(path);
+            }
+        }
+    }
+    eprintln!("[RLP] config path non trovato su nessun drive (C:-Z:)");
+    None
 }
 
 struct LcuClient { client: Client, port: String, auth: String }
 
 impl LcuClient {
     fn new() -> Option<Self> {
-        let content = fs::read_to_string(get_lockfile_path()).ok()?;
+        let content = fs::read_to_string(get_lockfile_path()?).ok()?;
         let parts: Vec<&str> = content.split(':').collect();
         if parts.len() < 4 { return None; }
         let port = parts[2].to_string();
@@ -662,9 +702,11 @@ async fn import_item_set(_lcu: &LcuClient, champion: &str, position: &str, build
         "blocks": blocks
     });
 
-    let config_path = std::path::PathBuf::from(
-        r"C:\Riot Games\League of Legends\Config\Champions"
-    ).join(champion).join("Recommended");
+    // Usa il path dinamico invece del path hardcoded
+    let config_path = get_league_config_path()
+        .ok_or("Cartella League of Legends non trovata su nessun drive (C:-Z:)")?
+        .join(champion)
+        .join("Recommended");
 
     fs::create_dir_all(&config_path).map_err(|e| format!("mkdir error: {}", e))?;
     let file_path = config_path.join("RLP.json");
