@@ -197,7 +197,6 @@ async fn opgg_get_champion_build(champion_name: &str, position: &str) -> Result<
     let champ_upper = champion_name.to_uppercase();
     const MCP_URL: &str = "https://mcp-api.op.gg/mcp";
 
-    // Step 1: initialize
     let init_res = client.post(MCP_URL)
         .header("Content-Type","application/json")
         .header("Accept","application/json, text/event-stream")
@@ -209,33 +208,13 @@ async fn opgg_get_champion_build(champion_name: &str, position: &str) -> Result<
     let session_id = init_res.headers().get("mcp-session-id")
         .and_then(|v| v.to_str().ok()).map(String::from);
     let _ = init_res.text().await;
-    eprintln!("[RLP] session_id={:?}", session_id);
 
-    // Step 2: notifications/initialized
     {
         let mut r = client.post(MCP_URL).header("Content-Type","application/json");
         if let Some(ref sid) = session_id { r = r.header("mcp-session-id", sid.as_str()); }
         let _ = r.json(&json!({"jsonrpc":"2.0","method":"notifications/initialized"})).send().await;
     }
 
-    // Step 3: tools/list — log all tool names
-    {
-        let mut r = client.post(MCP_URL)
-            .header("Content-Type","application/json")
-            .header("Accept","application/json, text/event-stream");
-        if let Some(ref sid) = session_id { r = r.header("mcp-session-id", sid.as_str()); }
-        if let Ok(res) = r.json(&json!({"jsonrpc":"2.0","id":99,"method":"tools/list"})).send().await {
-            let t = res.text().await.unwrap_or_default();
-            if let Ok(p) = serde_json::from_str::<Value>(&t) {
-                if let Some(tools) = p["result"]["tools"].as_array() {
-                    let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
-                    eprintln!("[RLP] TOOL NAMES: {:?}", names);
-                }
-            }
-        }
-    }
-
-    // Step 4: tools/call
     let mut req = client.post(MCP_URL)
         .header("Content-Type","application/json")
         .header("Accept","application/json, text/event-stream");
@@ -256,6 +235,9 @@ async fn opgg_get_champion_build(champion_name: &str, position: &str) -> Result<
                     "data.starter_items",
                     "data.core_items",
                     "data.last_items",
+                    "data.fourth_items",
+                    "data.fifth_items",
+                    "data.sixth_items",
                     "data.boots"
                 ]
             }
@@ -263,15 +245,7 @@ async fn opgg_get_champion_build(champion_name: &str, position: &str) -> Result<
     })).send().await.map_err(|e| format!("HTTP error: {}", e))?;
 
     let text = res.text().await.map_err(|e| e.to_string())?;
-    // Log in chunks to see full response
-    let mut _off = 0;
-    while _off < text.len() {
-        let _end = (_off + 800).min(text.len());
-        eprintln!("[RLP] raw[{}-{}]: {:?}", _off, _end, &text[_off.._end]);
-        _off = _end;
-    }
 
-    // Check for MCP error
     if let Ok(p) = serde_json::from_str::<Value>(&text) {
         if let Some(err) = p.get("error") {
             return Err(format!("MCP tool error: {}", err));
@@ -279,9 +253,8 @@ async fn opgg_get_champion_build(champion_name: &str, position: &str) -> Result<
     }
 
     let text_content = mcp_extract_text(&text).await
-        .ok_or_else(|| format!("No text in MCP response: {}", &text[..text.len().min(400)]))?;
+        .ok_or_else(|| format!("No text in MCP response"))?;
 
-    eprintln!("[RLP] text_content (400): {:?}", &text_content[..text_content.len().min(400)]);
     parse_opgg_response(&text_content)
 }
 
@@ -347,66 +320,75 @@ fn parse_opgg_response(text: &str) -> Result<Value, String> {
     let summoner_spells: Value = {
         fn spell_id_to_name(id: u64) -> &'static str {
             match id {
-                4  => "Flash",
-                14 => "Ignite",
-                12 => "Teleport",
-                21 => "Barrier",
-                3  => "Exhaust",
-                6  => "Ghost",
-                7  => "Heal",
-                1  => "Cleanse",
-                11 => "Smite",
-                13 => "Clarity",
-                32 => "Mark",
-                _  => "Flash",
+                4=>"Flash", 14=>"Ignite", 12=>"Teleport", 21=>"Barrier", 3=>"Exhaust",
+                6=>"Ghost", 7=>"Heal", 1=>"Cleanse", 11=>"Smite", 13=>"Clarity", 32=>"Mark",
+                _=>"Flash",
             }
         }
         let mut names: Vec<Value> = Vec::new();
         if let Some(pos) = text.find("SummonerSpells(") {
             let section = &text[pos+"SummonerSpells(".len()..];
-            // The first [...] contains the spell IDs e.g. [4,21]
             if let Some(bracket_start) = section.find('[') {
                 let bracket_section = &section[bracket_start..];
                 if let Some(bracket_end) = bracket_section.find(']') {
-                    let ids_str = &bracket_section[1..bracket_end]; // "4,21"
+                    let ids_str = &bracket_section[1..bracket_end];
                     for id_str in ids_str.split(',') {
-                        if let Ok(id) = id_str.trim().parse::<u64>() {
-                            names.push(json!(spell_id_to_name(id)));
-                        }
+                        if let Ok(id) = id_str.trim().parse::<u64>() { names.push(json!(spell_id_to_name(id))); }
                     }
                 }
             }
-            eprintln!("[RLP] SummonerSpells parsed: {:?}", names);
-        } else {
-            eprintln!("[RLP] SummonerSpells( NOT FOUND");
         }
         if names.len() >= 2 { json!([names[0].clone(), names[1].clone()]) } else { json!(["Flash","Heal"]) }
     };
 
-    // Raccogliamo tutti i blocchi SummonerSpells per gli items
-    let mut all_blocks = Vec::new();
-    let mut search_text = text;
-    while let Some(pos) = search_text.find("SummonerSpells(") {
-        search_text = &search_text[pos + 15..]; // 15 è la lunghezza di "SummonerSpells("
-        if let Some(bracket) = search_text.find('[') {
-            let s = &search_text[bracket..];
-            if let Some(end) = s.find(']') {
-                all_blocks.push(extract_numbers(&s[..end+1]));
+    // Parse all SummonerSpells( blocks from data section
+    // Structure: [0]=spells, [1]=starter, [2]=core, [3..N-1]=situational (1 item each), [N]=boots
+    let data_start = text.find("LolGetChampionAnalysis(").unwrap_or(0);
+    let data_text = &text[data_start..];
+
+    let mut all_blocks: Vec<Vec<u64>> = Vec::new();
+    let mut search = data_text;
+    while let Some(pos) = search.find("SummonerSpells(") {
+        search = &search[pos + "SummonerSpells(".len()..];
+        if let Some(b_start) = search.find('[') {
+            let s = &search[b_start+1..];
+            if let Some(b_end) = s.find(']') {
+                let ids: Vec<u64> = s[..b_end].split(',')
+                    .filter_map(|x| x.trim().parse::<u64>().ok())
+                    .filter(|&id| id > 100 && id < 500000)
+                    .collect();
+                all_blocks.push(ids);
             }
         }
     }
 
-    let starting_items: Value = all_blocks.get(1)
-        .map(|ids| Value::Array(ids.iter().map(|&id| json!({"id": id})).collect()))
-        .unwrap_or_else(|| json!([]));
+    eprintln!("[RLP] blocks: {:?}", all_blocks);
 
-    let core_items: Value = all_blocks.get(2)
-        .map(|ids| Value::Array(ids.iter().map(|&id| json!({"id": id})).collect()))
-        .unwrap_or_else(|| json!([]));
+    fn to_items(ids: &[u64]) -> Value {
+        Value::Array(ids.iter().map(|&id| json!({"id": id})).collect())
+    }
 
-    let last_items: Value = all_blocks.get(3)
-        .map(|ids| Value::Array(ids.iter().map(|&id| json!({"id": id})).collect()))
-        .unwrap_or_else(|| json!([]));
+    // Separate blocks by content: spells have IDs <= 32, items have IDs > 100
+    let item_blocks: Vec<&Vec<u64>> = all_blocks.iter()
+        .filter(|b| !b.is_empty() && b.iter().all(|&id| id > 100))
+        .collect();
+    eprintln!("[RLP] item_blocks: {:?}", item_blocks);
+
+    let empty: Vec<u64> = vec![];
+    // item_blocks[0]=starter, [1]=core, [2..last-1]=situational, [last]=boots
+    let starter = item_blocks.get(0).copied().unwrap_or(&empty);
+    let core    = item_blocks.get(1).copied().unwrap_or(&empty);
+    let boots   = item_blocks.last().filter(|_| item_blocks.len() > 2).copied().unwrap_or(&empty);
+    let situ_end = if item_blocks.len() > 2 { item_blocks.len() - 1 } else { item_blocks.len() };
+    // Deduplica situazionali rispetto al core
+    let core_set: std::collections::HashSet<u64> = core.iter().copied().collect();
+    let situ: Vec<u64> = item_blocks.get(2..situ_end)
+        .unwrap_or(&[])
+        .iter()
+        .flat_map(|b| b.iter().copied())
+        .filter(|id| !core_set.contains(id))
+        .collect::<std::collections::HashSet<u64>>()
+        .into_iter().collect();
 
     Ok(json!({
         "data": {
@@ -416,87 +398,112 @@ fn parse_opgg_response(text: &str) -> Result<Value, String> {
                 "stat_mod_ids": stat_mod_ids
             },
             "summoner_spells": summoner_spells,
-            "starting_items": starting_items, "core_items": core_items, "last_items": last_items
+            "starter_items":   to_items(starter),
+            "core_items":      to_items(core),
+            "situ_items":      to_items(&situ),
+            "boots":           to_items(boots)
         }
     }))
 }
 
 async fn import_runes(lcu: &LcuClient, champion: &str, position: &str, build: &Value) -> Result<(String,String),String> {
-    let rune_data = build.pointer("/data/runes").or_else(|| build.get("runes"))
-        .ok_or("Rune non trovate")?;
-    let primary_id = rune_data["primary_page_id"].as_u64().map(|n| n as u32)
-        .or_else(|| rune_data["primary_page_id"].as_str().and_then(rune_path_id)).unwrap_or(8000);
-    let sub_id = rune_data["sub_page_id"].as_u64().map(|n| n as u32)
-        .or_else(|| rune_data["sub_page_id"].as_str().and_then(rune_path_id)).unwrap_or(8100);
+    let rune_data = build.pointer("/data/runes").or_else(|| build.get("runes")).ok_or("Rune non trovate")?;
+    let primary_id = rune_data["primary_page_id"].as_u64().map(|n| n as u32).unwrap_or(8000);
+    let sub_id = rune_data["sub_page_id"].as_u64().map(|n| n as u32).unwrap_or(8100);
     let primary_path_name = rune_data["primary_page_id"].as_str().unwrap_or("Precision");
-    let primary_ids: Vec<u32> = rune_data["primary_rune_ids"].as_array().unwrap_or(&vec![])
-        .iter().filter_map(|v| v.as_str().and_then(rune_name_to_id).or_else(|| v.as_u64().map(|n| n as u32))).collect();
-    let sub_ids: Vec<u32> = rune_data["sub_rune_ids"].as_array().unwrap_or(&vec![])
-        .iter().filter_map(|v| v.as_str().and_then(rune_name_to_id).or_else(|| v.as_u64().map(|n| n as u32))).collect();
-    let stat_ids: Vec<u32> = rune_data["stat_mod_ids"].as_array()
-        .map(|a| a.iter().filter_map(|v| v.as_u64().map(|n| n as u32)).collect())
-        .unwrap_or_else(|| vec![5008,5008,5002]);
+    let primary_ids: Vec<u32> = rune_data["primary_rune_ids"].as_array().unwrap_or(&vec![]).iter().filter_map(|v| v.as_u64().map(|n| n as u32)).collect();
+    let sub_ids: Vec<u32> = rune_data["sub_rune_ids"].as_array().unwrap_or(&vec![]).iter().filter_map(|v| v.as_u64().map(|n| n as u32)).collect();
+    let stat_ids: Vec<u32> = rune_data["stat_mod_ids"].as_array().map(|a| a.iter().filter_map(|v| v.as_u64().map(|n| n as u32)).collect()).unwrap_or_else(|| vec![5008,5008,5002]);
+    
     let page_name = format!("RLP {} {}", champion, position);
-    let pages: Vec<Value> = lcu.get("/lol-perks/v1/pages").await
-        .and_then(|v| v.as_array().cloned()).unwrap_or_default();
+    let pages: Vec<Value> = lcu.get("/lol-perks/v1/pages").await.and_then(|v| v.as_array().cloned()).unwrap_or_default();
     let editable: Vec<&Value> = pages.iter().filter(|p| p["isDeletable"].as_bool().unwrap_or(false)).collect();
-    let del_id = editable.iter().find(|p| p["name"].as_str().unwrap_or("")==page_name)
-        .or_else(|| editable.first()).and_then(|p| p["id"].as_u64());
+    let del_id = editable.iter().find(|p| p["name"].as_str().unwrap_or("")==page_name).or_else(|| editable.first()).and_then(|p| p["id"].as_u64());
+    
     if let Some(id) = del_id {
         let _ = lcu.client.delete(&format!("https://127.0.0.1:{}/lol-perks/v1/pages/{}", lcu.port, id))
             .header("Authorization", format!("Basic {}", lcu.auth)).send().await;
     }
+    
     let mut perks = Vec::new();
     perks.extend_from_slice(&primary_ids);
     perks.extend_from_slice(&sub_ids);
     perks.extend_from_slice(&stat_ids);
-    lcu.post("/lol-perks/v1/pages", &json!({
+    
+    let resp = lcu.post("/lol-perks/v1/pages", &json!({
         "name": page_name, "primaryStyleId": primary_id, "subStyleId": sub_id,
         "selectedPerkIds": perks, "current": true
-    })).await.ok_or("Impossibile creare pagina rune")?;
+    })).await;
+    
+    if resp.is_none() { return Err("Il client ha rifiutato la pagina (possibile Rune ID non valido)".to_string()); }
     Ok((page_name, primary_path_name.to_string()))
 }
 
 async fn import_summoners(lcu: &LcuClient, build: &Value) -> Result<Vec<String>,String> {
-    let spells_raw = build.pointer("/data/summoner_spells").or_else(|| build.get("summoner_spells"))
-        .and_then(|v| v.as_array()).ok_or("Summoner spells non trovate")?;
+    let spells_raw = build.pointer("/data/summoner_spells").and_then(|v| v.as_array()).ok_or("Summoner spells non trovate")?;
     let spell_names: Vec<String> = spells_raw.iter().filter_map(|v| v.as_str().map(String::from)).collect();
-    if spell_names.len() < 2 { return Err(format!("Meno di 2 spell: {:?}", spells_raw)); }
-    let id1 = spell_name_to_id(&spell_names[0]).ok_or_else(|| format!("Spell '{}' non riconosciuta", spell_names[0]))?;
-    let id2 = spell_name_to_id(&spell_names[1]).ok_or_else(|| format!("Spell '{}' non riconosciuta", spell_names[1]))?;
+    if spell_names.len() < 2 { return Err(format!("Meno di 2 spell")); }
+    let id1 = spell_name_to_id(&spell_names[0]).unwrap_or(4);
+    let id2 = spell_name_to_id(&spell_names[1]).unwrap_or(7);
+    
     let resp = lcu.client.patch(&format!("https://127.0.0.1:{}/lol-champ-select/v1/session/my-selection", lcu.port))
-        .header("Authorization", format!("Basic {}", lcu.auth))
-        .header("Content-Type","application/json")
-        .json(&json!({"spell1Id":id1,"spell2Id":id2}))
-        .send().await.map_err(|e| format!("LCU patch error: {}", e))?;
-    let status = resp.status().as_u16();
-    if status==204||status==200 { Ok(spell_names) } else {
-        let body = resp.text().await.unwrap_or_default();
-        Err(format!("LCU status {}: {}", status, &body[..body.len().min(200)]))
-    }
+        .header("Authorization", format!("Basic {}", lcu.auth)).header("Content-Type","application/json")
+        .json(&json!({"spell1Id":id1,"spell2Id":id2})).send().await.map_err(|e| e.to_string())?;
+        
+    if resp.status().is_success() { Ok(spell_names) } else { Err("Il client ha rifiutato il cambio spell".to_string()) }
 }
 
-async fn import_item_set(lcu: &LcuClient, champion: &str, position: &str, build: &Value, puuid: &str) -> Result<usize,String> {
+async fn import_item_set(_lcu: &LcuClient, champion: &str, position: &str, build: &Value, _puuid: &str) -> Result<usize,String> {
     let mut blocks: Vec<Value> = Vec::new();
-    for (key, label) in &[("/data/starting_items","Starting Items"),("/data/core_items","Core Build"),("/data/last_items","Situational / Late")] {
+
+    for (key, label) in &[
+        ("/data/starter_items", "Starter Items"),
+        ("/data/core_items",    "Core Build"),
+        ("/data/situ_items",    "Situational"),
+        ("/data/boots",         "Boots"),
+    ] {
         if let Some(arr) = build.pointer(key).and_then(|v| v.as_array()) {
-            let items: Vec<Value> = arr.iter().filter_map(|v| v["id"].as_u64().or_else(|| v.as_u64()))
-                .map(|id| json!({"id":id.to_string(),"count":1})).collect();
-            if !items.is_empty() { blocks.push(json!({"hideIfSummonerSpell":"","items":items,"type":label})); }
+            let items: Vec<Value> = arr.iter()
+                .filter_map(|v| v["id"].as_u64())
+                .map(|id| json!({"id": id.to_string(), "count": 1}))
+                .collect();
+            if !items.is_empty() {
+                blocks.push(json!({
+                    "type": label,
+                    "recMath": false,
+                    "minSummonerLevel": -1,
+                    "maxSummonerLevel": -1,
+                    "showIfSummonerSpell": "",
+                    "hideIfSummonerSpell": "",
+                    "items": items
+                }));
+            }
         }
     }
+
     if blocks.is_empty() { return Err("Nessun item trovato".to_string()); }
     let count = blocks.len();
-    lcu.put("/lol-item-sets/v1/sets", &json!({
-        "accountId": puuid, "timestamp": 0,
-        "itemSets": [json!({
-            "title": format!("RLP {} {} (OP.GG)", champion, position),
-            "associatedChampions": [], "associatedMaps": [11,12],
-            "blocks": blocks, "map":"any","mode":"any",
-            "preferredItemSlots":[],"sortrank":1,"startedFrom":"blank","type":"custom",
-            "uid": format!("rlp-{}-{}", champion.to_lowercase(), position.to_lowercase())
-        })]
-    })).await.ok_or("Impossibile salvare item set")?;
+
+    let item_set = json!({
+        "title": format!("RLP {} {}", champion, position),
+        "type": "custom",
+        "map": "any",
+        "mode": "any",
+        "priority": false,
+        "sortrank": 1,
+        "blocks": blocks
+    });
+
+    let config_path = std::path::PathBuf::from(
+        r"C:\Riot Games\League of Legends\Config\Champions"
+    ).join(champion).join("Recommended");
+
+    fs::create_dir_all(&config_path).map_err(|e| format!("mkdir error: {}", e))?;
+    let file_path = config_path.join("RLP.json");
+    let json_str = serde_json::to_string_pretty(&item_set).map_err(|e| e.to_string())?;
+    fs::write(&file_path, &json_str).map_err(|e| format!("write error: {}", e))?;
+
+    eprintln!("[RLP] item-set written: {:?} ({} blocks)", file_path, count);
     Ok(count)
 }
 
@@ -508,10 +515,10 @@ pub async fn get_champ_select_session() -> Result<ChampSelectSession, String> {
         return Ok(ChampSelectSession { in_progress:false, champion_name:String::new(), assigned_position:String::new() });
     }
     let my_cell = session["localPlayerCellId"].as_i64().unwrap_or(-1);
-    let my_slot = session["myTeam"].as_array()
-        .and_then(|team| team.iter().find(|p| p["cellId"].as_i64()==Some(my_cell)));
+    let my_slot = session["myTeam"].as_array().and_then(|team| team.iter().find(|p| p["cellId"].as_i64()==Some(my_cell)));
     let assigned_position = my_slot.and_then(|s| s["assignedPosition"].as_str()).unwrap_or("MIDDLE").to_uppercase();
     let mut champ_id = my_slot.and_then(|s| s["championId"].as_u64().or_else(|| s["championPickIntent"].as_u64())).unwrap_or(0);
+    
     if champ_id == 0 {
         if let Some(phases) = session["actions"].as_array() {
             'outer: for phase in phases {
@@ -528,12 +535,15 @@ pub async fn get_champ_select_session() -> Result<ChampSelectSession, String> {
     if champ_id == 0 {
         return Ok(ChampSelectSession { in_progress:true, champion_name:String::new(), assigned_position });
     }
+    
     let http = Client::builder().danger_accept_invalid_certs(true).build().unwrap();
     let champs: Value = http.get(&format!("https://ddragon.leagueoflegends.com/cdn/{}/data/en_US/champion.json", PATCH))
         .send().await.map_err(|e| e.to_string())?.json().await.map_err(|e| e.to_string())?;
+        
     let champion_name = champs["data"].as_object()
         .and_then(|map| map.values().find(|c| c["key"].as_str().map(|k| k==champ_id.to_string()).unwrap_or(false)))
         .and_then(|c| c["id"].as_str()).unwrap_or("Unknown").to_string();
+        
     Ok(ChampSelectSession { in_progress:true, champion_name, assigned_position })
 }
 
@@ -560,27 +570,40 @@ pub async fn auto_import_build(champion_name: String, assigned_position: String)
         runes_imported:false, summoners_imported:false, items_imported:false,
         rune_page_name:None, primary_path:None, summoner_spells:Vec::new(), item_blocks:None, errors:Vec::new(),
     };
+    
     let lcu = match LcuClient::new() {
         Some(c) => c,
         None => { result.errors.push("Client LoL non disponibile".to_string()); return Ok(result); }
     };
+    
     let build = match opgg_get_champion_build(&champion_name, &assigned_position).await {
         Ok(b) => b,
         Err(e) => { result.errors.push(format!("OP.GG fetch fallito: {}", e)); return Ok(result); }
     };
+    
     let summoner: Value = lcu.get("/lol-summoner/v1/current-summoner").await.unwrap_or(json!({}));
-    let puuid = summoner["puuid"].as_str().unwrap_or("unknown").to_string();
+    let puuid = summoner["puuid"].as_str().unwrap_or("").to_string();
+    eprintln!("[RLP] summoner puuid={}", puuid);
+    
     match import_runes(&lcu, &champion_name, &assigned_position, &build).await {
         Ok((name,path)) => { result.runes_imported=true; result.rune_page_name=Some(name); result.primary_path=Some(path); }
         Err(e) => result.errors.push(format!("Rune: {}", e)),
     }
+    
     match import_summoners(&lcu, &build).await {
         Ok(spells) => { result.summoners_imported=true; result.summoner_spells=spells; }
         Err(e) => result.errors.push(format!("Summoners: {}", e)),
     }
+    
     match import_item_set(&lcu, &champion_name, &assigned_position, &build, &puuid).await {
         Ok(blocks) => { result.items_imported=true; result.item_blocks=Some(blocks); }
         Err(e) => result.errors.push(format!("Item set: {}", e)),
     }
+
+    // STAMPA GLI ERRORI NELLA CONSOLE, COSÌ POSSIAMO DEBUGGARE SE FALLISCE DI NUOVO
+    if !result.errors.is_empty() {
+        eprintln!("\n[RLP] ⚠️ ERRORI RILEVATI DURANTE L'IMPORTAZIONE:\n{:#?}\n", result.errors);
+    }
+    
     Ok(result)
 }
