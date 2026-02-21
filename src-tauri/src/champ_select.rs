@@ -492,11 +492,13 @@ fn parse_opgg_response(text: &str) -> Result<Value, String> {
 
     // Gruppi: [0]=varianti core (mostriamo come "Core Variants"),
     //         [1]=4th, [2]=5th, [3]=6th
-    let slot_labels = [("Core Variants", 0usize), ("4th Item", 1), ("5th Item", 2), ("6th Item", 3)];
+    let slot_labels = [("3rd Item Options", 0usize), ("4th Item", 1), ("5th Item", 2), ("6th Item", 3)];
     let mut slots: Vec<Value> = Vec::new();
     for (label, idx) in &slot_labels {
         if let Some(ids) = groups.get(*idx) {
             if !ids.is_empty() {
+                // Salta "3rd Item Options" se è identico al core principale (dati ridondanti)
+                if *label == "3rd Item Options" && *ids == core { continue; }
                 slots.push(json!({"label": label, "items": to_items(ids)}));
             }
         }

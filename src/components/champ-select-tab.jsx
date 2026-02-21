@@ -293,9 +293,9 @@ export function ChampSelectTab() {
                         {importResult.items_imported ? (
                             <div className="space-y-1">
                                 <p className="text-green-400 text-sm">✓ Importato</p>
-                                {importResult.item_blocks && (
-                                    <p className="text-slate-400 text-xs">{importResult.item_blocks} blocchi</p>
-                                )}
+                                {/*{importResult.item_blocks && (*/}
+                                {/*    <p className="text-slate-400 text-xs">{importResult.item_blocks} blocchi</p>*/}
+                                {/*)}*/}
                             </div>
                         ) : (
                             <p className="text-red-400 text-sm">✗ Non importato</p>
