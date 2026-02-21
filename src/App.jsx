@@ -9,6 +9,7 @@ import { User, History, TrendingUp, Search, BarChart2, Swords } from "lucide-rea
 import { Input } from "./components/ui/input";
 import { Button } from "./components/ui/button";
 import "./App.css";
+
 import { ChampSelectTab } from "./components/champ-select-tab";
 
 export default function App() {
@@ -337,12 +338,14 @@ export default function App() {
                 <div className="max-w-7xl mx-auto px-4 py-4">
                     <div className="flex items-center justify-between">
                         <div className="flex items-center gap-3">
-                            <div className="w-10 h-10 bg-gradient-to-br from-blue-500 to-purple-600 rounded-lg flex items-center justify-center">
-                                <span className="text-white font-bold text-xl">LoL</span>
-                            </div>
+                            <img
+                                src="/RLP Icon.png"
+                                alt="RLP Logo"
+                                className="w-23 h-23 rounded.xl-lg object-cover"
+                                onError={e => { e.target.src = "/RLP_Icon.png"; }}
+                            />
                             <div>
-                                <h1 className="text-xl font-bold text-white">League Stats</h1>
-                                <p className="text-xs text-slate-400">Statistics & Analytics</p>
+                                <h1 className="text-xl font-bold text-white">RLP</h1>
                             </div>
                         </div>
                         <div className="flex items-center gap-3">
