@@ -312,20 +312,6 @@ fn extract_array_content<'a>(s: &'a str, after: &str) -> Option<&'a str> {
     if end > 0 { Some(&rest[start..start+end+1]) } else { None }
 }
 
-fn parse_item_section(text: &str, section_name: &str) -> Value {
-    if let Some(pos) = text.find(section_name) {
-        let section = &text[pos..];
-        if let Some(bracket) = section.find('[') {
-            let s = &section[bracket..];
-            if let Some(end) = s.find(']') {
-                let ids: Vec<Value> = extract_numbers(&s[..end+1]).iter().map(|&id| json!({"id":id})).collect();
-                if !ids.is_empty() { return Value::Array(ids); }
-            }
-        }
-    }
-    Value::Array(vec![])
-}
-
 fn parse_opgg_response(text: &str) -> Result<Value, String> {
     let (primary_page_id, sub_page_id, primary_rune_ids, sub_rune_ids, stat_mod_ids) = {
         let runes_start = text.find("Runes(").ok_or("Runes( non trovato")?;
@@ -397,9 +383,30 @@ fn parse_opgg_response(text: &str) -> Result<Value, String> {
         if names.len() >= 2 { json!([names[0].clone(), names[1].clone()]) } else { json!(["Flash","Heal"]) }
     };
 
-    let starting_items = parse_item_section(text, "starter_items");
-    let core_items = parse_item_section(text, "CoreItems");
-    let last_items = parse_item_section(text, "last_items");
+    // Raccogliamo tutti i blocchi SummonerSpells per gli items
+    let mut all_blocks = Vec::new();
+    let mut search_text = text;
+    while let Some(pos) = search_text.find("SummonerSpells(") {
+        search_text = &search_text[pos + 15..]; // 15 è la lunghezza di "SummonerSpells("
+        if let Some(bracket) = search_text.find('[') {
+            let s = &search_text[bracket..];
+            if let Some(end) = s.find(']') {
+                all_blocks.push(extract_numbers(&s[..end+1]));
+            }
+        }
+    }
+
+    let starting_items: Value = all_blocks.get(1)
+        .map(|ids| Value::Array(ids.iter().map(|&id| json!({"id": id})).collect()))
+        .unwrap_or_else(|| json!([]));
+
+    let core_items: Value = all_blocks.get(2)
+        .map(|ids| Value::Array(ids.iter().map(|&id| json!({"id": id})).collect()))
+        .unwrap_or_else(|| json!([]));
+
+    let last_items: Value = all_blocks.get(3)
+        .map(|ids| Value::Array(ids.iter().map(|&id| json!({"id": id})).collect()))
+        .unwrap_or_else(|| json!([]));
 
     Ok(json!({
         "data": {
