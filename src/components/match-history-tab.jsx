@@ -93,10 +93,13 @@ function TeamsPanel({ participants, myTeamId, myPuuid, mySummonerName, onPlayerC
         if (p.isMe === true) return true;
         if (myPuuid && p.puuid === myPuuid) return true;
         if (!mySummonerName) return false;
-        const name = mySummonerName.toLowerCase();
+        const fullName = mySummonerName.toLowerCase();
+        const gameName = fullName.split("#")[0];
         return (
-            p.summonerName?.toLowerCase() === name ||
-            p.riotIdGameName?.toLowerCase() === name
+            p.summonerName?.toLowerCase() === fullName ||
+            p.riotIdGameName?.toLowerCase() === fullName ||
+            p.summonerName?.toLowerCase() === gameName ||
+            p.riotIdGameName?.toLowerCase() === gameName
         );
     }
 
@@ -133,7 +136,7 @@ function TeamsPanel({ participants, myTeamId, myPuuid, mySummonerName, onPlayerC
             <div
                 onClick={clickable ? handleClick : undefined}
                 className={`flex items-center gap-2 py-1 px-2 rounded-md transition-colors
-                    ${isMe ? "bg-blue-900/30 border border-blue-800/50" : ""}
+                    ${isMe ? "bg-slate-700/70 border border-slate-600/50" : ""}
                     ${clickable ? "cursor-pointer hover:bg-slate-700/70 hover:border hover:border-slate-600/50" : "hover:bg-slate-800/50"}
                 `}
             >
@@ -188,12 +191,17 @@ function MatchCard({ match, myPuuid, mySummonerName, onPlayerClick }) {
     const participants = info.participants ?? [];
 
     // Identifica il giocatore: PUUID prima (affidabile), poi nome (fallback)
+    // mySummonerName e' "GameName#TAG" ma riotIdGameName non include il tag
+    const myGameName = mySummonerName?.split("#")[0]?.toLowerCase() ?? "";
+    const myFullLower = mySummonerName?.toLowerCase() ?? "";
     const me = participants.find(p =>
         p.isMe === true ||
         (myPuuid && p.puuid === myPuuid) ||
         (mySummonerName && (
-            p.summonerName?.toLowerCase() === mySummonerName.toLowerCase() ||
-            p.riotIdGameName?.toLowerCase() === mySummonerName.toLowerCase()
+            p.summonerName?.toLowerCase() === myFullLower ||
+            p.riotIdGameName?.toLowerCase() === myFullLower ||
+            (myGameName && p.riotIdGameName?.toLowerCase() === myGameName) ||
+            (myGameName && p.summonerName?.toLowerCase() === myGameName)
         ))
     ) ?? participants[0];
 
@@ -343,12 +351,17 @@ function MatchCard({ match, myPuuid, mySummonerName, onPlayerClick }) {
 // Estrae i dati del giocatore corrente da un match (struttura Riot API o flat)
 export function resolveMe(match, myPuuid, mySummonerName) {
     const participants = match.info?.participants ?? match.participants ?? [];
+    // mySummonerName e' spesso "GameName#TAG" ma riotIdGameName non include il tag
+    const myGameName = mySummonerName?.split("#")[0]?.toLowerCase() ?? "";
+    const myFullLower = mySummonerName?.toLowerCase() ?? "";
     const me = participants.find(p =>
         p.isMe === true ||
         (myPuuid && p.puuid === myPuuid) ||
         (mySummonerName && (
-            p.summonerName?.toLowerCase() === mySummonerName.toLowerCase() ||
-            p.riotIdGameName?.toLowerCase() === mySummonerName.toLowerCase()
+            p.summonerName?.toLowerCase() === myFullLower ||
+            p.riotIdGameName?.toLowerCase() === myFullLower ||
+            (myGameName && p.riotIdGameName?.toLowerCase() === myGameName) ||
+            (myGameName && p.summonerName?.toLowerCase() === myGameName)
         ))
     ) ?? participants[0];
     if (!me) return match;

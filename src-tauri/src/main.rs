@@ -22,9 +22,11 @@ use champ_select::{get_champ_select_session, auto_import_build, debug_champ_sele
 
 const OPGG_MCP_URL: &str = "https://mcp-api.op.gg/mcp";
 
-/// Legge RIOT_API_KEY dal .env (o variabile d'ambiente di sistema in produzione)
-fn riot_api_key() -> String {
-    std::env::var("RIOT_API_KEY").expect("RIOT_API_KEY non trovata — controlla il file .env")
+/// RIOT_API_KEY compilata dentro il binario al momento della build.
+/// Impostala come variabile d'ambiente prima di `npm run tauri build`
+/// oppure tramite .cargo/config.toml (non va committato su git).
+fn riot_api_key() -> &'static str {
+    env!("RIOT_API_KEY")
 }
 
 // OnceCell stores Option<Pool> so we never retry a failed init
@@ -33,11 +35,11 @@ static POOL: OnceCell<Option<Pool>> = OnceCell::const_new();
 async fn get_pool() -> Option<&'static Pool> {
     POOL.get_or_init(|| async {
         let mut cfg = Config::new();
-        cfg.host     = Some(std::env::var("NEON_HOST").expect("NEON_HOST non trovata nel .env"));
-        cfg.port     = Some(std::env::var("NEON_PORT").unwrap_or_else(|_| "5432".into()).parse::<u16>().unwrap_or(5432));
-        cfg.dbname   = Some(std::env::var("NEON_DB").expect("NEON_DB non trovata nel .env"));
-        cfg.user     = Some(std::env::var("NEON_USER").expect("NEON_USER non trovata nel .env"));
-        cfg.password = Some(std::env::var("NEON_PASSWORD").expect("NEON_PASSWORD non trovata nel .env"));
+        cfg.host     = Some(env!("NEON_HOST").to_string());
+        cfg.port     = Some(env!("NEON_PORT", "5432").parse::<u16>().unwrap_or(5432));
+        cfg.dbname   = Some(env!("NEON_DB").to_string());
+        cfg.user     = Some(env!("NEON_USER").to_string());
+        cfg.password = Some(env!("NEON_PASSWORD").to_string());
         cfg.manager  = Some(ManagerConfig { recycling_method: RecyclingMethod::Fast });
 
         let connector = match TlsConnector::builder()
@@ -286,17 +288,18 @@ async fn call_opgg_tool(tool_name: &str, arguments: Value, client: &Client) -> R
 
 #[tauri::command]
 async fn get_profiles(handle: AppHandle) -> Result<Value, String> {
-    let lock_path  = match get_lockfile_path() {
-        Some(p) => p,
-        None    => return cached_data.ok_or("CLIENT_CLOSED".into()),
-    };
-    let cache_p    = get_cache_path(&handle);
+    let cache_p = get_cache_path(&handle);
 
     let cached_data: Option<Value> = fs::read_to_string(&cache_p).ok()
         .and_then(|s| serde_json::from_str(&s).ok());
 
+    let lock_path = match get_lockfile_path() {
+        Some(p) => p,
+        None    => return Err("CLIENT_CLOSED".into()),
+    };
+
     if !lock_path.exists() {
-        return cached_data.ok_or("CLIENT_CLOSED".into());
+        return Err("CLIENT_CLOSED".into());
     }
 
     let content  = fs::read_to_string(lock_path).map_err(|_| "Errore lockfile")?;
@@ -315,8 +318,17 @@ async fn get_profiles(handle: AppHandle) -> Result<Value, String> {
 
     let game_name = current_profile["gameName"].as_str().unwrap_or("").to_string();
     let tag_line  = current_profile["tagLine"].as_str().unwrap_or("").to_string();
-    if game_name.is_empty() || tag_line.is_empty() {
-        return Err("Impossibile leggere gameName/tagLine dal client".into());
+
+    // Se gameName e' un ID temporaneo di match (es: "teambuilder-match-7743720497")
+    // il client e' in uno stato transitorio. Restituiamo la cache se disponibile,
+    // altrimenti segnaliamo che il client non e' pronto.
+    if game_name.is_empty() || game_name.contains("-match-") || game_name.starts_with("teambuilder-") {
+        eprintln!("[RLP] gameName transitorio: '{}', uso cache o attendo", game_name);
+        return cached_data.ok_or("CLIENT_NOT_READY".into());
+    }
+
+    if tag_line.is_empty() {
+        return Err("Impossibile leggere tagLine dal client".into());
     }
 
     let puuid = fetch_puuid(&game_name, &tag_line, &client).await
@@ -882,8 +894,6 @@ async fn get_tier_list() -> Result<String, String> {
 }
 
 fn main() {
-    // Carica il file .env (in sviluppo). In produzione usa variabili d'ambiente di sistema.
-    dotenvy::dotenv().ok();
 
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![

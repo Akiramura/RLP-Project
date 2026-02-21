@@ -342,7 +342,12 @@ export default function App() {
 
     function mapRanked(ranked, queueType) {
         if (!ranked) return null;
-        const queue = ranked.queueMap?.[queueType];
+
+        // Formato 1: queueMap è un oggetto keyed per queueType
+        // Formato 2: queues è un array (risposta LCU /lol-ranked/v1/current-ranked-stats)
+        let queue = ranked.queueMap?.[queueType]
+            ?? ranked.queues?.find(q => q.queueType === queueType);
+
         if (!queue || !queue.tier || queue.tier === "" || queue.division === "NA") return null;
         return {
             tier: queue.tier,
