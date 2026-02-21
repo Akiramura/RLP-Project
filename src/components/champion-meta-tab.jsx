@@ -230,7 +230,9 @@ function normalizeChampName(name) {
     return name.replace(/['\u2019\s\.]/g, "");
 }
 
-export function ChampionMetaTab({ matches, seasonFetchDone }) {
+export function ChampionMetaTab({ matches, seasonFetchDone, metaData }) {
+    // Usa metaData prop (dati live da OP.GG) se disponibile, altrimenti fallback su META_DATA statico
+    const activeMetaData = (metaData && Object.keys(metaData).length > 0) ? metaData : META_DATA;
     const [filterKey, setFilterKey] = useState("all");
 
     // Filtra i match in base al periodo selezionato
@@ -312,7 +314,7 @@ export function ChampionMetaTab({ matches, seasonFetchDone }) {
     const champList = Object.entries(champStats)
         .map(([name, s]) => {
             const normalized = normalizeChampName(name);
-            const meta = META_DATA[normalized] || META_DATA[name] || null;
+            const meta = activeMetaData[normalized] || activeMetaData[name] || null;
             const myWR = parseFloat(((s.wins / s.games) * 100).toFixed(1));
             const diff = meta ? parseFloat((myWR - meta.metaWR).toFixed(1)) : null;
             return {
@@ -575,7 +577,7 @@ export function ChampionMetaTab({ matches, seasonFetchDone }) {
                 )}
 
                 <p className="text-center text-slate-600 text-xs pb-4">
-                    Meta data: Lolalytics Emerald+ ({Object.keys(META_DATA).length} campioni) • {activeLabel} • {totalGames} partite
+                    Meta data: {metaData && Object.keys(metaData).length > 0 ? "OP.GG Live" : "Lolalytics (statico)"} Emerald+ ({Object.keys(activeMetaData).length} campioni) • {activeLabel} • {totalGames} partite
                 </p>
 
             </>)}

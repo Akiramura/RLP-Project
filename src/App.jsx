@@ -39,6 +39,7 @@ export default function App() {
 
     const [activeTab, setActiveTab] = useState("profile");
     const [isInChampSelect, setIsInChampSelect] = useState(false);
+    const [liveMetaData, setLiveMetaData] = useState({});
     const champSelectPollRef = useRef(null);
     const wasInChampSelect = useRef(false);
 
@@ -341,11 +342,12 @@ export default function App() {
                             <img
                                 src="/RLP Icon.png"
                                 alt="RLP Logo"
-                                className="w-23 h-23 rounded.xl-lg object-cover"
+                                className="w-16 h-16 rounded-xl object-cover"
                                 onError={e => { e.target.src = "/RLP_Icon.png"; }}
                             />
                             <div>
-                                <h1 className="text-xl font-bold text-white">RLP</h1>
+                                <h1 className="text-xl font-bold text-white">League Stats</h1>
+                                <p className="text-xs text-slate-400">Statistics & Analytics</p>
                             </div>
                         </div>
                         <div className="flex items-center gap-3">
@@ -532,11 +534,12 @@ export default function App() {
                             matches={activeMatches}
                             profile={activeProfile}
                             seasonFetchDone={searchData ? searchSeasonFetchDone : seasonFetchDone}
+                            metaData={liveMetaData}
                         />
                     </TabsContent>
 
                     <TabsContent value="tier-list">
-                        <MetaTab />
+                        <MetaTab onMetaDataReady={setLiveMetaData} />
                     </TabsContent>
 
                     <TabsContent value="champ-select" keepMounted>

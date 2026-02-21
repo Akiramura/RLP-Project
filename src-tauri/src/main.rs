@@ -14,13 +14,18 @@ use postgres_native_tls::MakeTlsConnector;
 // tokio-postgres    = { version = "0.7" }
 // postgres-native-tls = "0.5"
 // native-tls        = "0.2"
+// dotenvy           = "0.15"
 // ────────────────────────────────────────────────────────────────────────────
 
 mod champ_select;
 use champ_select::{get_champ_select_session, auto_import_build, debug_champ_select_slot};
 
-const RIOT_API_KEY: &str = "RGAPI-f074c374-0fed-4612-a46b-0d0c18ab76ba";
 const OPGG_MCP_URL: &str = "https://mcp-api.op.gg/mcp";
+
+/// Legge RIOT_API_KEY dal .env (o variabile d'ambiente di sistema in produzione)
+fn riot_api_key() -> String {
+    std::env::var("RIOT_API_KEY").expect("RIOT_API_KEY non trovata — controlla il file .env")
+}
 
 // OnceCell stores Option<Pool> so we never retry a failed init
 static POOL: OnceCell<Option<Pool>> = OnceCell::const_new();
@@ -28,11 +33,11 @@ static POOL: OnceCell<Option<Pool>> = OnceCell::const_new();
 async fn get_pool() -> Option<&'static Pool> {
     POOL.get_or_init(|| async {
         let mut cfg = Config::new();
-        cfg.host     = Some("ep-muddy-voice-als8bfl8-pooler.c-3.eu-central-1.aws.neon.tech".to_string());
-        cfg.port     = Some(5432);
-        cfg.dbname   = Some("neondb".to_string());
-        cfg.user     = Some("neondb_owner".to_string());
-        cfg.password = Some("npg_iGh6YXECB7ML".to_string());
+        cfg.host     = Some(std::env::var("NEON_HOST").expect("NEON_HOST non trovata nel .env"));
+        cfg.port     = Some(std::env::var("NEON_PORT").unwrap_or_else(|_| "5432".into()).parse::<u16>().unwrap_or(5432));
+        cfg.dbname   = Some(std::env::var("NEON_DB").expect("NEON_DB non trovata nel .env"));
+        cfg.user     = Some(std::env::var("NEON_USER").expect("NEON_USER non trovata nel .env"));
+        cfg.password = Some(std::env::var("NEON_PASSWORD").expect("NEON_PASSWORD non trovata nel .env"));
         cfg.manager  = Some(ManagerConfig { recycling_method: RecyclingMethod::Fast });
 
         let connector = match TlsConnector::builder()
@@ -174,7 +179,7 @@ async fn fetch_puuid(game_name: &str, tag_line: &str, client: &Client) -> Option
         "https://europe.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{}/{}",
         game_name, tag_line
     );
-    let res  = client.get(&url).header("X-Riot-Token", RIOT_API_KEY).send().await.ok()?;
+    let res  = client.get(&url).header("X-Riot-Token", riot_api_key()).send().await.ok()?;
     let data: Value = res.json().await.ok()?;
     data["puuid"].as_str().map(|s| s.to_string())
 }
@@ -185,7 +190,7 @@ async fn fetch_match_ids(puuid: &str, start: u32, count: u32, client: &Client) -
         puuid, start, count
     );
     for attempt in 0..3u32 {
-        match client.get(&url).header("X-Riot-Token", RIOT_API_KEY).send().await {
+        match client.get(&url).header("X-Riot-Token", riot_api_key()).send().await {
             Ok(res) => {
                 if res.status().as_u16() == 429 {
                     let wait = 2000 * (attempt + 1) as u64;
@@ -208,7 +213,7 @@ async fn fetch_match_detail(match_id: &str, client: &Client) -> Value {
     }
     let url = format!("https://europe.api.riotgames.com/lol/match/v5/matches/{}", match_id);
     for attempt in 0..3u32 {
-        match client.get(&url).header("X-Riot-Token", RIOT_API_KEY).send().await {
+        match client.get(&url).header("X-Riot-Token", riot_api_key()).send().await {
             Ok(res) => {
                 if res.status().as_u16() == 429 {
                     let wait = 2000 * (attempt + 1) as u64;
@@ -256,7 +261,7 @@ async fn call_opgg_tool(tool_name: &str, arguments: Value, client: &Client) -> R
             }
         }
     }
-    Err(format!("Risposta OP.GG non valida: {}", &text[..200.min(text.len())]))
+    Err(format!("Risposta OP.GG non valida (primi 800 car): {}", &text[..800.min(text.len())]))
 }
 
 // ── Tauri commands ───────────────────────────────────────────────────────────
@@ -354,20 +359,20 @@ async fn search_summoner(game_name: String, tag_line: String) -> Result<Value, S
 
     let account: Value = client
         .get(&format!("https://europe.api.riotgames.com/riot/account/v1/accounts/by-puuid/{}", puuid))
-        .header("X-Riot-Token", RIOT_API_KEY)
+        .header("X-Riot-Token", riot_api_key())
         .send().await.map_err(|e| e.to_string())?
         .json().await.map_err(|_| "Errore JSON account")?;
 
     let ranked_text = client
         .get(&format!("https://euw1.api.riotgames.com/lol/league/v4/entries/by-puuid/{}", puuid))
-        .header("X-Riot-Token", RIOT_API_KEY)
+        .header("X-Riot-Token", riot_api_key())
         .send().await.map_err(|e| e.to_string())?
         .text().await.unwrap_or_default();
     let ranked_entries: Value = serde_json::from_str(&ranked_text).unwrap_or(json!([]));
 
     let summoner: Value = client
         .get(&format!("https://euw1.api.riotgames.com/lol/summoner/v4/summoners/by-puuid/{}", puuid))
-        .header("X-Riot-Token", RIOT_API_KEY)
+        .header("X-Riot-Token", riot_api_key())
         .send().await.map_err(|e| e.to_string())?
         .json().await.unwrap_or(json!({}));
 
@@ -457,12 +462,336 @@ async fn list_opgg_tools() -> Result<Value, String> {
     serde_json::from_str(&text).map_err(|_| format!("Raw: {}", &text[..text.len().min(500)]))
 }
 
+/// Parsa il formato testuale proprietario OP.GG.
+///
+/// STRUTTURA REALE dell'API:
+///   LolListLaneMetaChampions("en_US","all",Data(Positions(
+///     [Top("Ornn",...),Top("Singed",...),...],   ← indice 0 = top
+///     [Top("Ahri",...), ...],                    ← indice 1 = mid
+///     [Top("Kha'Zix",...), ...],                 ← indice 2 = jungle
+///     [Top("Jinx",...), ...],                    ← indice 3 = adc
+///     [Top("Nami",...), ...]                     ← indice 4 = support
+///   )))
+///
+/// NOTA CRITICA: OP.GG usa "Top(" come class name per TUTTE e 5 le lane.
+/// La lane si determina SOLO dalla posizione dell'array (0=top,1=mid,...).
+fn parse_opgg_text(text: &str) -> Value {
+    // Ordine fisso dei 5 array dentro Positions(...)
+    let lane_order = ["top", "mid", "jungle", "adc", "support"];
+    let mut all_champions: Vec<Value> = Vec::new();
+
+    // 1. Trova "Positions([" e il byte-offset dell'apertura '('
+    let marker = "Positions(";
+    let pos_marker_start = match text.find(marker) {
+        Some(p) => p,
+        None => {
+            eprintln!("[parse_opgg_text] 'Positions(' non trovato, fallback");
+            return parse_opgg_text_fallback(text);
+        }
+    };
+    let pos_open = pos_marker_start + marker.len(); // indice della '(' di apertura
+
+    // 2. Estrai tutto il contenuto di Positions(...) contando le parentesi TONDE
+    let positions_content = {
+        let after = &text[pos_open..];
+        let mut depth = 0i32;
+        let mut end = after.len();
+        for (i, ch) in after.char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 { end = i; break; }
+                }
+                _ => {}
+            }
+        }
+        // positions_content = "([Top(...),...],[Top(...),...],..." (include le [ ] esterne)
+        &after[..end]
+    };
+
+    eprintln!("[parse_opgg_text] positions_content len={}, anteprima: {}",
+        positions_content.len(),
+        &positions_content[..positions_content.len().min(80)]);
+
+    // 3. Splitta i 5 gruppi trovando ']' a profondità parentetica 0
+    //    positions_content inizia con '(' poi '[', es: "([Top(...),...],[Top(...),...],...)"
+    let mut groups: Vec<&str> = Vec::new();
+    {
+        let chars: Vec<(usize, char)> = positions_content.char_indices().collect();
+        let len = chars.len();
+        let mut depth = 0i32;
+        let mut group_start: Option<usize> = None; // byte-offset dell'apertura '['
+
+        let mut i = 0;
+        while i < len {
+            let (byte_i, ch) = chars[i];
+            match ch {
+                '[' if depth == 0 => {
+                    group_start = Some(byte_i + 1); // dopo la '['
+                }
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                ']' if depth == 0 => {
+                    if let Some(start) = group_start {
+                        groups.push(&positions_content[start..byte_i]);
+                        group_start = None;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+    }
+
+    eprintln!("[parse_opgg_text] Trovati {} gruppi (attesi 5)", groups.len());
+
+    // 4. Per ogni gruppo parsa i record "Top(...)"
+    for (idx, group) in groups.iter().enumerate() {
+        let lane = match lane_order.get(idx) {
+            Some(&l) => l,
+            None => { eprintln!("[parse_opgg_text] gruppo extra idx={}", idx); continue; }
+        };
+
+        let pattern = "Top(";
+        let mut search = *group;
+        let mut count = 0usize;
+
+        while let Some(start_idx) = search.find(pattern) {
+            let rest = &search[start_idx + pattern.len()..];
+
+            // Trova la ')' di chiusura del record contando le parentesi annidate
+            let mut pd = 1i32;
+            let mut end = rest.len();
+            for (i, ch) in rest.char_indices() {
+                match ch {
+                    '(' => pd += 1,
+                    ')' => {
+                        pd -= 1;
+                        if pd == 0 { end = i; break; }
+                    }
+                    _ => {}
+                }
+            }
+
+            let inner = &rest[..end];
+            let values = split_csv(inner);
+
+            if values.len() >= 11 {
+                let champion  = values[0].trim().trim_matches('"').to_string();
+                let win_rate  = values[5].trim().parse::<f64>().unwrap_or(0.5);
+                let pick_rate = values[6].trim().parse::<f64>().unwrap_or(0.0);
+                let ban_rate  = values[8].trim().parse::<f64>().unwrap_or(0.0);
+                let kda       = values[9].trim().parse::<f64>().unwrap_or(0.0);
+                let tier      = values[10].trim().parse::<u64>().unwrap_or(5);
+                let play      = values[2].trim().parse::<u64>().unwrap_or(0);
+                let win       = values[3].trim().parse::<u64>().unwrap_or(0);
+
+                all_champions.push(json!({
+                    "champion_id": champion,
+                    "position":    lane,
+                    "win_rate":    win_rate,
+                    "pick_rate":   pick_rate,
+                    "ban_rate":    ban_rate,
+                    "kda":         kda,
+                    "tier":        tier,
+                    "games":       play,
+                    "wins":        win,
+                }));
+                count += 1;
+            }
+
+            // Avanza oltre questo record
+            search = &rest[end + 1..];
+        }
+
+        eprintln!("[parse_opgg_text] Lane {}: {} campioni", lane, count);
+    }
+
+    eprintln!("[parse_opgg_text] Totale campioni: {}", all_champions.len());
+    json!({ "data": all_champions })
+}
+
+/// Fallback: usato solo se "Positions(" non viene trovato (formato inatteso)
+fn parse_opgg_text_fallback(text: &str) -> Value {
+    eprintln!("[parse_opgg_text_fallback] Tentativo fallback...");
+    // Cerca i 5 blocchi in base alla posizione dei separatori ],[ nel testo
+    // Trova tutti i Top( e assegna le lane in base all'ordine dei gruppi separati da ],[
+    let mut all_champions: Vec<Value> = Vec::new();
+    let lane_order = ["top", "mid", "jungle", "adc", "support"];
+
+    // Trova gli offset dei separatori ],[ di primo livello dopo "Positions(["
+    let base = match text.find("Positions([") {
+        Some(p) => p + "Positions([".len(),
+        None    => 0,
+    };
+
+    // Raccoglie i byte-offset di ogni "],["
+    let mut group_starts: Vec<usize> = vec![base];
+    let sub = &text[base..];
+    let chars: Vec<(usize, char)> = sub.char_indices().collect();
+    let mut depth = 0i32;
+    let mut i = 0;
+    while i < chars.len() {
+        let (bi, ch) = chars[i];
+        match ch {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ']' if depth == 0 => {
+                if i + 2 < chars.len() && chars[i+1].1 == ',' && chars[i+2].1 == '[' {
+                    group_starts.push(base + chars[i+3].0);
+                    i += 2;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    for (idx, &gs) in group_starts.iter().enumerate() {
+        let lane = match lane_order.get(idx) { Some(&l) => l, None => break };
+        let ge   = group_starts.get(idx + 1).copied().unwrap_or(text.len());
+        let section = &text[gs..ge];
+
+        let mut search = section;
+        while let Some(si) = search.find("Top(") {
+            let rest = &search[si + 4..];
+            let mut pd = 1i32;
+            let mut end = rest.len();
+            for (i, ch) in rest.char_indices() {
+                match ch { '(' => pd += 1, ')' => { pd -= 1; if pd == 0 { end = i; break; } } _ => {} }
+            }
+            let values = split_csv(&rest[..end]);
+            if values.len() >= 11 {
+                let champion  = values[0].trim().trim_matches('"').to_string();
+                let win_rate  = values[5].trim().parse::<f64>().unwrap_or(0.5);
+                let pick_rate = values[6].trim().parse::<f64>().unwrap_or(0.0);
+                let ban_rate  = values[8].trim().parse::<f64>().unwrap_or(0.0);
+                let kda       = values[9].trim().parse::<f64>().unwrap_or(0.0);
+                let tier      = values[10].trim().parse::<u64>().unwrap_or(5);
+                let play      = values[2].trim().parse::<u64>().unwrap_or(0);
+                let win       = values[3].trim().parse::<u64>().unwrap_or(0);
+                all_champions.push(json!({
+                    "champion_id": champion, "position": lane,
+                    "win_rate": win_rate, "pick_rate": pick_rate, "ban_rate": ban_rate,
+                    "kda": kda, "tier": tier, "games": play, "wins": win,
+                }));
+            }
+            search = &rest[end + 1..];
+        }
+    }
+
+    eprintln!("[parse_opgg_text_fallback] Totale: {}", all_champions.len());
+    json!({ "data": all_champions })
+}
+
+/// Splitta CSV rispettando le stringhe tra virgolette
+fn split_csv(s: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    for ch in s.chars() {
+        match ch {
+            '"' => in_quotes = !in_quotes,
+            ',' if !in_quotes => {
+                result.push(current.clone());
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !current.is_empty() { result.push(current); }
+    result
+}
+
+#[tauri::command]
+async fn get_tier_list() -> Result<String, String> {
+    let client = Client::builder()
+        .danger_accept_invalid_certs(true)
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        .build().unwrap();
+
+    let body = json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": { "name": "lol_list_lane_meta_champions", "arguments": {
+            "region": "euw",
+            "lang": "en_US",
+            "position_filter": "all"
+        }}
+    });
+
+    let res = client.post(OPGG_MCP_URL)
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json, text/event-stream")
+        .json(&body).send().await.map_err(|e| e.to_string())?;
+
+    let raw_text = res.text().await.map_err(|e| e.to_string())?;
+
+    eprintln!("[get_tier_list] Risposta ricevuta, lunghezza: {} bytes", raw_text.len());
+    eprintln!("[get_tier_list] Primi 400 chars: {}", &raw_text[..raw_text.len().min(400)]);
+
+    // Scansiona ogni riga della risposta SSE/JSON
+    for line in raw_text.lines() {
+        let line = line.trim();
+        if line.is_empty() { continue; }
+
+        // Rimuovi il prefisso "data: " se presente
+        let data_str = line.strip_prefix("data: ").unwrap_or(line);
+
+        if let Ok(parsed) = serde_json::from_str::<Value>(data_str) {
+            // Struttura principale: result.content[].text
+            if let Some(content) = parsed["result"]["content"].as_array() {
+                for item in content {
+                    if item["type"] == "text" {
+                        if let Some(text_val) = item["text"].as_str() {
+                            eprintln!("[get_tier_list] Trovato testo via result.content, len={}", text_val.len());
+                            return Ok(text_val.to_string());
+                        }
+                    }
+                }
+            }
+            // Struttura alternativa: params.content[].text (alcuni server MCP)
+            if let Some(content) = parsed["params"]["content"].as_array() {
+                for item in content {
+                    if item["type"] == "text" {
+                        if let Some(text_val) = item["text"].as_str() {
+                            eprintln!("[get_tier_list] Trovato testo via params.content, len={}", text_val.len());
+                            return Ok(text_val.to_string());
+                        }
+                    }
+                }
+            }
+            // Struttura alternativa 2: content[].text diretto
+            if let Some(content) = parsed["content"].as_array() {
+                for item in content {
+                    if item["type"] == "text" {
+                        if let Some(text_val) = item["text"].as_str() {
+                            eprintln!("[get_tier_list] Trovato testo via content, len={}", text_val.len());
+                            return Ok(text_val.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Log della risposta completa per debug
+    eprintln!("[get_tier_list] ERRORE - risposta completa:\n{}", raw_text);
+    Err(format!(
+        "Nessun testo trovato nella risposta OP.GG. Primi 400 chars: {}",
+        &raw_text[..raw_text.len().min(400)]
+    ))
+}
+
 fn main() {
+    // Carica il file .env (in sviluppo). In produzione usa variabili d'ambiente di sistema.
+    dotenvy::dotenv().ok();
+
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             get_profiles, get_more_matches, search_summoner, get_opgg_data,
             get_champ_select_session, auto_import_build, list_opgg_tools,
-            debug_champ_select_slot  // ← FIX: aggiunto comando mancante
+            debug_champ_select_slot, get_tier_list
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
