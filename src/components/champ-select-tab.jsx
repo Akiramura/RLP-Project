@@ -42,7 +42,7 @@ const STATUS_LABEL = {
     [STATUS.IDLE]: "In attesa del client...",
     [STATUS.DETECTING]: "Rilevamento champion select...",
     [STATUS.FOUND]: "Campione rilevato, scarico build...",
-    [STATUS.FETCHING]: "Recupero build da OP.GG...",
+    [STATUS.FETCHING]: "Recupero build...",
     [STATUS.IMPORTING]: "Importazione in corso...",
     [STATUS.DONE]: "Build importata con successo!",
     [STATUS.ERROR]: "Errore durante l'importazione",
@@ -224,7 +224,7 @@ export function ChampSelectTab() {
                     <StepRow icon={Shield} label="Rilevamento champion select"
                         active={isActive(STATUS.DETECTING) || isActive(STATUS.FOUND)}
                         done={isDone(STATUS.DETECTING)} />
-                    <StepRow icon={Zap} label="Recupero build da OP.GG"
+                    <StepRow icon={Zap} label="Recupero build..."
                         active={isActive(STATUS.FETCHING)}
                         done={isDone(STATUS.FETCHING)} />
                     <StepRow icon={Package} label="Importazione rune / summoners / item set"

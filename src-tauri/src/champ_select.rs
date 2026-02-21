@@ -230,15 +230,17 @@ async fn opgg_get_champion_build(champion_name: &str, position: &str) -> Result<
                 "position": pos,
                 "lang": "en_US",
                 "desired_output_fields": [
-                    "data.summoner_spells",
-                    "data.runes",
-                    "data.starter_items",
-                    "data.core_items",
-                    "data.last_items",
-                    "data.fourth_items",
-                    "data.fifth_items",
-                    "data.sixth_items",
-                    "data.boots"
+                    "data.summoner_spells.{ids,ids_names}",
+                    "data.runes.{primary_page_id,primary_page_name,primary_rune_ids,secondary_page_id,secondary_page_name,secondary_rune_ids,stat_mod_ids}",
+                    "data.starter_items[].{ids,ids_names}",
+                    "data.core_items[].{ids,ids_names}",
+                    "data.last_items[].{ids,ids_names}",
+                    "data.fourth_items[].{ids,ids_names}",
+                    "data.fifth_items[].{ids,ids_names}",
+                    "data.sixth_items[].{ids,ids_names}",
+                    "data.boots[].{ids,ids_names}",
+                    "data.skills.{order}",
+                    "data.mythic_items[].{ids,ids_names}"
                 ]
             }
         }
@@ -255,6 +257,13 @@ async fn opgg_get_champion_build(champion_name: &str, position: &str) -> Result<
     let text_content = mcp_extract_text(&text).await
         .ok_or_else(|| format!("No text in MCP response"))?;
 
+    // Log full text_content in chunks
+    let mut _off = 0;
+    while _off < text_content.len() {
+        let _end = (_off + 500).min(text_content.len());
+        eprintln!("[RLP] tc[{}-{}]: {:?}", _off, _end, &text_content[_off.._end]);
+        _off = _end;
+    }
     parse_opgg_response(&text_content)
 }
 
@@ -287,33 +296,49 @@ fn extract_array_content<'a>(s: &'a str, after: &str) -> Option<&'a str> {
 
 fn parse_opgg_response(text: &str) -> Result<Value, String> {
     let (primary_page_id, sub_page_id, primary_rune_ids, sub_rune_ids, stat_mod_ids) = {
+        // Formato attuale: Runes(primary_id,"primary_name",[primary_runes],sub_id,"sub_name",[sub_runes],[stat_mods])
+        // Es: Runes(8000,"Precision",[8008,9111,9103,8017],8300,"Inspiration",[8313,8321],[5005,5008,5011])
         let runes_start = text.find("Runes(").ok_or("Runes( non trovato")?;
-        let runes_section = &text[runes_start..];
-        let until_first_bracket = &runes_section[6..runes_section.find('[').unwrap_or(50)];
-        let scalar_nums = extract_numbers(until_first_bracket);
-        let primary_page_id = scalar_nums.get(1).copied().unwrap_or(8000) as u32;
-        let primary_ids: Vec<u32> = extract_array_content(runes_section, "Runes(")
-            .map(|s| extract_numbers(s).iter().map(|&n| n as u32).collect()).unwrap_or_default();
-        let after_first_array = runes_section.find(']').unwrap_or(0);
-        let after_names_array = runes_section[after_first_array+1..].find(']')
-            .map(|p| after_first_array+1+p+1).unwrap_or(after_first_array+1);
-        let sec_section = &runes_section[after_names_array..];
-        let sec_nums = extract_numbers(&sec_section[..sec_section.find('[').unwrap_or(20)]);
-        let sub_page_id = sec_nums.first().copied().unwrap_or(8100) as u32;
-        let sec_ids: Vec<u32> = sec_section.find('[').and_then(|p| {
-            let s = &sec_section[p..];
-            let end = s.find(']').map(|e| e+1)?;
-            Some(extract_numbers(&s[..end]).iter().map(|&n| n as u32).collect())
-        }).unwrap_or_default();
-        let after_sec_array = sec_section.find(']').unwrap_or(0);
-        let after_sec_names = sec_section[after_sec_array+1..].find(']')
-            .map(|p| after_sec_array+1+p+1).unwrap_or(after_sec_array+1);
-        let stat_section = &sec_section[after_sec_names..];
-        let stat_ids: Vec<u32> = stat_section.find('[').and_then(|p| {
-            let s = &stat_section[p..];
-            let end = s.find(']').map(|e| e+1)?;
-            Some(extract_numbers(&s[..end]).iter().map(|&n| n as u32).collect())
-        }).unwrap_or_else(|| vec![5008,5008,5002]);
+        let runes_section = &text[runes_start + "Runes(".len()..];
+
+        // Trova tutti gli array [...] dentro Runes(...)
+        // Array[0] = primary_rune_ids, Array[1] = sub_rune_ids, Array[2] = stat_mod_ids
+        let mut arrays: Vec<Vec<u32>> = Vec::new();
+        let mut scalars_before: Vec<Vec<u64>> = Vec::new(); // scalari prima di ogni array
+        let mut pos = 0;
+        let rbytes = runes_section.as_bytes();
+        let mut current_scalars = String::new();
+        while pos < rbytes.len() && arrays.len() < 3 {
+            if rbytes[pos] == b'[' {
+                // Salva gli scalari accumulati prima di questo array
+                scalars_before.push(extract_numbers(&current_scalars));
+                current_scalars.clear();
+                // Leggi l'array
+                let start = pos + 1;
+                pos += 1;
+                while pos < rbytes.len() && rbytes[pos] != b']' { pos += 1; }
+                let arr_str = &runes_section[start..pos];
+                arrays.push(arr_str.split(',').filter_map(|x| x.trim().parse::<u32>().ok()).collect());
+                pos += 1; // salta ]
+            } else if rbytes[pos] == b')' {
+                break; // fine Runes(...)
+            } else {
+                current_scalars.push(rbytes[pos] as char);
+                pos += 1;
+            }
+        }
+
+        // scalars_before[0] = testo prima del primo array → contiene primary_page_id
+        // scalars_before[1] = testo tra primo e secondo array → contiene sub_page_id
+        let primary_page_id = scalars_before.get(0).and_then(|v| v.get(0)).copied().unwrap_or(8000) as u32;
+        let sub_page_id     = scalars_before.get(1).and_then(|v| v.get(0)).copied().unwrap_or(8300) as u32;
+        let primary_ids = arrays.get(0).cloned().unwrap_or_default();
+        let sec_ids     = arrays.get(1).cloned().unwrap_or_default();
+        let stat_ids    = arrays.get(2).cloned().unwrap_or_else(|| vec![5008,5008,5002]);
+
+        eprintln!("[RLP] runes parsed: primary={} sub={} primary_ids={:?} sub_ids={:?} stat={:?}",
+            primary_page_id, sub_page_id, primary_ids, sec_ids, stat_ids);
+
         (primary_page_id, sub_page_id, primary_ids, sec_ids, stat_ids)
     };
 
@@ -341,54 +366,167 @@ fn parse_opgg_response(text: &str) -> Result<Value, String> {
         if names.len() >= 2 { json!([names[0].clone(), names[1].clone()]) } else { json!(["Flash","Heal"]) }
     };
 
-    // Parse all SummonerSpells( blocks from data section
-    // Structure: [0]=spells, [1]=starter, [2]=core, [3..N-1]=situational (1 item each), [N]=boots
-    let data_start = text.find("LolGetChampionAnalysis(").unwrap_or(0);
-    let data_text = &text[data_start..];
-
-    let mut all_blocks: Vec<Vec<u64>> = Vec::new();
-    let mut search = data_text;
-    while let Some(pos) = search.find("SummonerSpells(") {
-        search = &search[pos + "SummonerSpells(".len()..];
-        if let Some(b_start) = search.find('[') {
-            let s = &search[b_start+1..];
-            if let Some(b_end) = s.find(']') {
-                let ids: Vec<u64> = s[..b_end].split(',')
-                    .filter_map(|x| x.trim().parse::<u64>().ok())
-                    .filter(|&id| id > 100 && id < 500000)
-                    .collect();
-                all_blocks.push(ids);
-            }
-        }
-    }
-
-    eprintln!("[RLP] blocks: {:?}", all_blocks);
-
     fn to_items(ids: &[u64]) -> Value {
         Value::Array(ids.iter().map(|&id| json!({"id": id})).collect())
     }
 
-    // Separate blocks by content: spells have IDs <= 32, items have IDs > 100
-    let item_blocks: Vec<&Vec<u64>> = all_blocks.iter()
-        .filter(|b| !b.is_empty() && b.iter().all(|&id| id > 100))
-        .collect();
-    eprintln!("[RLP] item_blocks: {:?}", item_blocks);
+    // Estrae tutti gli ID item da una stringa che contiene SummonerSpells(...)
+    fn extract_item_ids_from_group(group: &str) -> Vec<u64> {
+        let mut ids = Vec::new();
+        let mut search = group;
+        while let Some(pos) = search.find("SummonerSpells(") {
+            search = &search[pos + "SummonerSpells(".len()..];
+            if let Some(b_start) = search.find('[') {
+                let s = &search[b_start+1..];
+                if let Some(b_end) = s.find(']') {
+                    for x in s[..b_end].split(',') {
+                        if let Ok(id) = x.trim().parse::<u64>() {
+                            if id > 100 && id < 500000 { ids.push(id); }
+                        }
+                    }
+                }
+            }
+        }
+        ids
+    }
+
+    // ── Parser strutturale ────────────────────────────────────────────────────
+    // La risposta OP.GG ha questa struttura nel testo:
+    //   Data(
+    //     SummonerSpells([spells]),          ← summoner spells
+    //     Runes(...),                        ← rune
+    //     SummonerSpells([starter]),         ← starter items (blocco singolo)
+    //     SummonerSpells([core_1,core_2,..]),← core build principale (blocco singolo con più item)
+    //     [SummonerSpells([c]),..],          ← varianti core (gruppo tra [])
+    //     [SummonerSpells([d]),..],          ← 4th item options (gruppo tra [])
+    //     [SummonerSpells([e]),..],          ← 5th item options
+    //     [SummonerSpells([f]),..],          ← 6th item options
+    //     SummonerSpells([boots]),           ← boots (blocco singolo)
+    //     Skills([...]),                     ← skill order
+    //   )
+    //
+    // Strategia: troviamo la sezione Data(...) e separiamo i token top-level
+    // distinguendo blocchi singoli SummonerSpells(...) da gruppi [...].
+
+    let data_start = text.find("LolGetChampionAnalysis(").unwrap_or(0);
+    let data_section = &text[data_start..];
+
+    // Raccogli i "token" top-level dopo Runes(...):
+    // - "single": un SummonerSpells singolo  → starter, core, boots
+    // - "group":  una lista [...] di SummonerSpells → varianti core, 4th, 5th, 6th
+    #[derive(Debug)]
+    enum Token { Single(Vec<u64>), Group(Vec<u64>) }
+
+    let mut tokens: Vec<Token> = Vec::new();
+    let mut runes_end = 0;
+    // Salta fino a dopo Runes(...)
+    if let Some(rp) = data_section.find("Runes(") {
+        let mut depth = 0i32;
+        let bytes = data_section[rp..].as_bytes();
+        for (i, &b) in bytes.iter().enumerate() {
+            if b == b'(' { depth += 1; }
+            else if b == b')' { depth -= 1; if depth == 0 { runes_end = rp + i + 1; break; } }
+        }
+    }
+    let after_runes = if runes_end > 0 { &data_section[runes_end..] } else { data_section };
+
+    // Scansione carattere per carattere dei token top-level
+    let bytes = after_runes.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'[' => {
+                // Gruppo: trova il ] di chiusura al livello 0
+                let start = i + 1;
+                let mut depth = 1i32;
+                i += 1;
+                while i < bytes.len() && depth > 0 {
+                    if bytes[i] == b'[' { depth += 1; }
+                    else if bytes[i] == b']' { depth -= 1; }
+                    i += 1;
+                }
+                let group_str = &after_runes[start..i-1];
+                let ids = extract_item_ids_from_group(group_str);
+                if !ids.is_empty() { tokens.push(Token::Group(ids)); }
+            }
+            b'S' if after_runes[i..].starts_with("StarterItems(") || after_runes[i..].starts_with("SummonerSpells(") => {
+                // Blocco singolo: StarterItems( oppure SummonerSpells( fuori da gruppi []
+                // Determina la lunghezza del prefisso
+                let prefix_len = if after_runes[i..].starts_with("StarterItems(") {
+                    "StarterItems(".len()
+                } else {
+                    "SummonerSpells(".len()
+                };
+                let sp_start = i + prefix_len;
+                if let Some(bracket) = after_runes[sp_start..].find('[') {
+                    let s = &after_runes[sp_start + bracket + 1..];
+                    if let Some(end) = s.find(']') {
+                        let ids: Vec<u64> = s[..end].split(',')
+                            .filter_map(|x| x.trim().parse::<u64>().ok())
+                            .filter(|&id| id > 100 && id < 500000)
+                            .collect();
+                        if !ids.is_empty() { tokens.push(Token::Single(ids)); }
+                    }
+                }
+                // Avanza oltre questo blocco
+                while i < bytes.len() && bytes[i] != b')' { i += 1; }
+                i += 1;
+            }
+            b'S' if after_runes[i..].starts_with("Skills(") => { break; } // fine dati item
+            _ => { i += 1; }
+        }
+    }
+
+    eprintln!("[RLP] tokens strutturali: {:?}", tokens);
+
+    // Classifica i token:
+    // Single[0] = starter, Single[1] = core principale, Single[last] = boots
+    // Group[0] = varianti core, Group[1] = 4th, Group[2] = 5th, Group[3] = 6th
+    let singles: Vec<&Vec<u64>> = tokens.iter().filter_map(|t| if let Token::Single(v) = t { Some(v) } else { None }).collect();
+    let groups:  Vec<&Vec<u64>> = tokens.iter().filter_map(|t| if let Token::Group(v)  = t { Some(v) } else { None }).collect();
 
     let empty: Vec<u64> = vec![];
-    // item_blocks[0]=starter, [1]=core, [2..last-1]=situational, [last]=boots
-    let starter = item_blocks.get(0).copied().unwrap_or(&empty);
-    let core    = item_blocks.get(1).copied().unwrap_or(&empty);
-    let boots   = item_blocks.last().filter(|_| item_blocks.len() > 2).copied().unwrap_or(&empty);
-    let situ_end = if item_blocks.len() > 2 { item_blocks.len() - 1 } else { item_blocks.len() };
-    // Deduplica situazionali rispetto al core
-    let core_set: std::collections::HashSet<u64> = core.iter().copied().collect();
-    let situ: Vec<u64> = item_blocks.get(2..situ_end)
-        .unwrap_or(&[])
-        .iter()
-        .flat_map(|b| b.iter().copied())
-        .filter(|id| !core_set.contains(id))
-        .collect::<std::collections::HashSet<u64>>()
-        .into_iter().collect();
+    let starter = singles.get(0).copied().unwrap_or(&empty);
+    let core    = singles.get(1).copied().unwrap_or(&empty);
+    let boots   = singles.last().filter(|_| singles.len() > 2).copied().unwrap_or(&empty);
+
+    // Gruppi: [0]=varianti core (mostriamo come "Core Variants"),
+    //         [1]=4th, [2]=5th, [3]=6th
+    let slot_labels = [("Core Variants", 0usize), ("4th Item", 1), ("5th Item", 2), ("6th Item", 3)];
+    let mut slots: Vec<Value> = Vec::new();
+    for (label, idx) in &slot_labels {
+        if let Some(ids) = groups.get(*idx) {
+            if !ids.is_empty() {
+                slots.push(json!({"label": label, "items": to_items(ids)}));
+            }
+        }
+    }
+
+    eprintln!("[RLP] starter={:?} core={:?} boots={:?} slots={}", starter, core, boots, slots.len());
+
+    // Parse skill order
+    let skill_order = {
+        let mut order = String::new();
+        if let Some(pos) = text.find("Skills(") {
+            let section = &text[pos + "Skills(".len()..];
+            if let Some(end) = section.find(')') {
+                let inner = &section[..end];
+                let mut seen: Vec<String> = Vec::new();
+                for token in inner.split(|c: char| !c.is_alphanumeric()) {
+                    let t = token.trim().to_uppercase();
+                    if (t == "Q" || t == "W" || t == "E") && !seen.contains(&t) {
+                        seen.push(t);
+                        if seen.len() == 3 { break; }
+                    }
+                }
+                if seen.len() == 3 {
+                    order = format!("{} → {} → {}", seen[0], seen[1], seen[2]);
+                }
+                eprintln!("[RLP] skill_order inner={:?} → {:?}", &inner[..inner.len().min(80)], order);
+            }
+        }
+        order
+    };
 
     Ok(json!({
         "data": {
@@ -400,8 +538,9 @@ fn parse_opgg_response(text: &str) -> Result<Value, String> {
             "summoner_spells": summoner_spells,
             "starter_items":   to_items(starter),
             "core_items":      to_items(core),
-            "situ_items":      to_items(&situ),
-            "boots":           to_items(boots)
+            "situ_slots":      Value::Array(slots),
+            "boots":           to_items(boots),
+            "skill_order":     skill_order
         }
     }))
 }
@@ -456,29 +595,56 @@ async fn import_summoners(lcu: &LcuClient, build: &Value) -> Result<Vec<String>,
 async fn import_item_set(_lcu: &LcuClient, champion: &str, position: &str, build: &Value, _puuid: &str) -> Result<usize,String> {
     let mut blocks: Vec<Value> = Vec::new();
 
-    for (key, label) in &[
-        ("/data/starter_items", "Starter Items"),
-        ("/data/core_items",    "Core Build"),
-        ("/data/situ_items",    "Situational"),
-        ("/data/boots",         "Boots"),
-    ] {
-        if let Some(arr) = build.pointer(key).and_then(|v| v.as_array()) {
-            let items: Vec<Value> = arr.iter()
-                .filter_map(|v| v["id"].as_u64())
-                .map(|id| json!({"id": id.to_string(), "count": 1}))
-                .collect();
-            if !items.is_empty() {
-                blocks.push(json!({
-                    "type": label,
-                    "recMath": false,
-                    "minSummonerLevel": -1,
-                    "maxSummonerLevel": -1,
-                    "showIfSummonerSpell": "",
-                    "hideIfSummonerSpell": "",
-                    "items": items
-                }));
+    let skill_order = build.pointer("/data/skill_order")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let core_label = if skill_order.is_empty() {
+        "Core Build".to_string()
+    } else {
+        format!("Core Build  |  {}", skill_order)
+    };
+
+    let make_block = |label: &str, ids: Vec<u64>| -> Option<Value> {
+        if ids.is_empty() { return None; }
+        Some(json!({
+            "type": label,
+            "recMath": false,
+            "minSummonerLevel": -1,
+            "maxSummonerLevel": -1,
+            "showIfSummonerSpell": "",
+            "hideIfSummonerSpell": "",
+            "items": ids.iter().map(|id| json!({"id": id.to_string(), "count": 1})).collect::<Vec<_>>()
+        }))
+    };
+
+    // 1. Starter Items
+    if let Some(arr) = build.pointer("/data/starter_items").and_then(|v| v.as_array()) {
+        let ids: Vec<u64> = arr.iter().filter_map(|v| v["id"].as_u64()).collect();
+        if let Some(b) = make_block("Starter Items", ids) { blocks.push(b); }
+    }
+
+    // 2. Core Build + skill order
+    if let Some(arr) = build.pointer("/data/core_items").and_then(|v| v.as_array()) {
+        let ids: Vec<u64> = arr.iter().filter_map(|v| v["id"].as_u64()).collect();
+        if let Some(b) = make_block(&core_label, ids) { blocks.push(b); }
+    }
+
+    // 3. Slot situazionali: Core Variants → 4th → 5th → 6th
+    // Ordine finale: Starter → Core | skill order → Core Variants → 4th → 5th → 6th → Boots
+    if let Some(situ_slots) = build.pointer("/data/situ_slots").and_then(|v| v.as_array()) {
+        for slot in situ_slots {
+            let label = slot["label"].as_str().unwrap_or("Situational");
+            if let Some(items_arr) = slot["items"].as_array() {
+                let ids: Vec<u64> = items_arr.iter().filter_map(|v| v["id"].as_u64()).collect();
+                if let Some(b) = make_block(label, ids) { blocks.push(b); }
             }
         }
+    }
+
+    // 4. Boots — ultimo
+    if let Some(arr) = build.pointer("/data/boots").and_then(|v| v.as_array()) {
+        let ids: Vec<u64> = arr.iter().filter_map(|v| v["id"].as_u64()).collect();
+        if let Some(b) = make_block("Boots", ids) { blocks.push(b); }
     }
 
     if blocks.is_empty() { return Err("Nessun item trovato".to_string()); }
@@ -600,7 +766,6 @@ pub async fn auto_import_build(champion_name: String, assigned_position: String)
         Err(e) => result.errors.push(format!("Item set: {}", e)),
     }
 
-    // STAMPA GLI ERRORI NELLA CONSOLE, COSÌ POSSIAMO DEBUGGARE SE FALLISCE DI NUOVO
     if !result.errors.is_empty() {
         eprintln!("\n[RLP] ⚠️ ERRORI RILEVATI DURANTE L'IMPORTAZIONE:\n{:#?}\n", result.errors);
     }
