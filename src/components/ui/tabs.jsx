@@ -2,8 +2,15 @@ import { createContext, useContext, useState } from "react";
 
 const TabsContext = createContext();
 
-export function Tabs({ defaultValue, children, className = "" }) {
-    const [activeTab, setActiveTab] = useState(defaultValue);
+export function Tabs({ defaultValue, value, onValueChange, children, className = "" }) {
+    const [internalTab, setInternalTab] = useState(defaultValue);
+
+    // Controlled mode if value is provided, otherwise uncontrolled
+    const activeTab = value !== undefined ? value : internalTab;
+    const setActiveTab = (tab) => {
+        if (onValueChange) onValueChange(tab);
+        if (value === undefined) setInternalTab(tab);
+    };
 
     return (
         <TabsContext.Provider value={{ activeTab, setActiveTab }}>
@@ -31,8 +38,15 @@ export function TabsTrigger({ value, children, className = "" }) {
     );
 }
 
-export function TabsContent({ value, children }) {
+export function TabsContent({ value, children, keepMounted = false }) {
     const { activeTab } = useContext(TabsContext);
-    if (value !== activeTab) return null;
-    return <div>{children}</div>;
+    const isActive = value === activeTab;
+
+    if (!keepMounted && !isActive) return null;
+
+    return (
+        <div style={keepMounted && !isActive ? { display: "none" } : undefined}>
+            {children}
+        </div>
+    );
 }

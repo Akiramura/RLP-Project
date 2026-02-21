@@ -36,6 +36,34 @@ export default function App() {
     const [searchExtraMatches, setSearchExtraMatches] = useState([]);
     const [loadingMoreSearch, setLoadingMoreSearch] = useState(false);
 
+    const [activeTab, setActiveTab] = useState("profile");
+    const [isInChampSelect, setIsInChampSelect] = useState(false);
+    const champSelectPollRef = useRef(null);
+    const wasInChampSelect = useRef(false);
+
+    // Poll champ select to auto-switch tab when a game lobby starts
+    useEffect(() => {
+        async function checkChampSelect() {
+            try {
+                const session = await invoke("get_champ_select_session");
+                const inProgress = session?.in_progress === true;
+                if (inProgress && !wasInChampSelect.current) {
+                    // Champ select just started → automatically switch to Auto Import tab
+                    setActiveTab("champ-select");
+                }
+                wasInChampSelect.current = inProgress;
+                setIsInChampSelect(inProgress);
+            } catch {
+                // Client not available or not in champ select, ignore silently
+                wasInChampSelect.current = false;
+                setIsInChampSelect(false);
+            }
+        }
+        champSelectPollRef.current = setInterval(checkChampSelect, 3000);
+        checkChampSelect();
+        return () => clearInterval(champSelectPollRef.current);
+    }, []);
+
     function extractPlayerData(matchDetail, puuid) {
         const info = matchDetail?.info;
         if (!info) return null;
@@ -390,7 +418,7 @@ export default function App() {
 
             {/* Main */}
             <main className="max-w-7xl mx-auto px-4 py-8">
-                <Tabs defaultValue="profile" className="space-y-6">
+                <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-6">
                     <TabsList className="bg-slate-900 border border-slate-800 p-1">
                         <TabsTrigger
                             value="profile"
@@ -422,10 +450,13 @@ export default function App() {
                         </TabsTrigger>
                         <TabsTrigger
                             value="champ-select"
-                            className="data-[state=active]:bg-blue-600 data-[state=active]:text-white"
+                            className="data-[state=active]:bg-blue-600 data-[state=active]:text-white relative"
                         >
                             <Swords className="w-4 h-4 mr-2" />
                             Auto Import
+                            {isInChampSelect && (
+                                <span className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-green-400 rounded-full animate-pulse" />
+                            )}
                         </TabsTrigger>
                     </TabsList>
 
@@ -505,7 +536,7 @@ export default function App() {
                         <MetaTab />
                     </TabsContent>
 
-                    <TabsContent value="champ-select">
+                    <TabsContent value="champ-select" keepMounted>
                         <ChampSelectTab />
                     </TabsContent>
 
