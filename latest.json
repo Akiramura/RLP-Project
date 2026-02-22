@@ -1,0 +1,11 @@
+﻿{
+    "platforms":  {
+                      "windows-x86_64":  {
+                                             "url":  "https://github.com/Akiramura/RLP-Project/releases/download/v1.0.0/rlp-project_0.1.0_x64_en-US.msi",
+                                             "signature":  "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTc3o5bkxGaUFlejRiTjhBOTRHOG9oeHQ3WEZkcUpqQkhZOXR1cnoxcDZJdE5aRXVMOXFaU1Z1V0NORE1ZdEp4cWJDcjd3TnhxbkF4WWJhWFZTM3ZnVHN3OXVKYTdSdUFZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzcxNzg3MjgyCWZpbGU6cmxwLXByb2plY3RfMS4wLjBfeDY0X2VuLVVTLm1zaQphd01maGozMnBwaFI5WlMrYTRPdmVGOHkvbUZ2V2FESmZOQWs0WGtwSHVFcDdwTXU4R1J0UFdEU2RoZDUxemR1SlJuVWJmQ1RBUEZ5eFJjWGU5R2pBUT09Cg=="
+                                         }
+                  },
+    "pub_date":  "2026-02-22T20:08:02Z",
+    "version":  "1.0.0",
+    "notes":  "Prima release con auto-updater"
+}
