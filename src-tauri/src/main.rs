@@ -1569,6 +1569,7 @@ async fn get_summoner_masteries(puuid: String) -> Result<Value, String> {
 fn main() {
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             get_profiles, get_more_matches, search_summoner, get_opgg_data,
             get_champ_select_session, auto_import_build, list_opgg_tools,
