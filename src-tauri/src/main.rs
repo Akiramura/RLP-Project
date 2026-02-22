@@ -482,7 +482,7 @@ async fn call_opgg_tool(tool_name: &str, arguments: Value, client: &Client) -> R
             }
         }
     }
-    Err(format!("Risposta OP.GG non valida (primi 800 car): {}", &text[..800.min(text.len())]))
+    Err(format!("Risposta OP.GGG non valida (primi 800 car): {}", &text[..800.min(text.len())]))
 }
 
 // ── Tauri commands ───────────────────────────────────────────────────────────
