@@ -21,7 +21,7 @@ cargo add tauri-plugin-updater --manifest-path src-tauri/Cargo.toml
 #
 # Esegui UNA VOLTA e conserva le chiavi in modo sicuro:
 
-npm run tauri signer generate -- -w ~/.tauri/rlp.key
+
 
 # Output esempio:
 #   Public key:  dW50cnVzdGVkIGNvbW1lbnQ6...

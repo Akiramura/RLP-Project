@@ -30,9 +30,9 @@ $CARGO_TOML    = "src-tauri\Cargo.toml"
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-function Log($msg) { Write-Host "▶ $msg" -ForegroundColor Cyan }
-function Ok($msg)  { Write-Host "✓ $msg" -ForegroundColor Green }
-function Err($msg) { Write-Host "✗ $msg" -ForegroundColor Red; exit 1 }
+function Log($msg) { Write-Host ">> $msg" -ForegroundColor Cyan }
+function Ok($msg)  { Write-Host "OK $msg" -ForegroundColor Green }
+function Err($msg) { Write-Host "!! $msg" -ForegroundColor Red; exit 1 }
 
 # ── Controlli preliminari ─────────────────────────────────────
 if (-not $GITHUB_TOKEN) { Err "GITHUB_TOKEN non impostato. Esegui: `$env:GITHUB_TOKEN = 'ghp_...'" }
@@ -51,8 +51,7 @@ $currentBranch = git rev-parse --abbrev-ref HEAD
 if ($LASTEXITCODE -ne 0) { Err "Non sei in una repo git." }
 
 # Assicurati di essere su dev e che sia pulito
-git checkout $DEV_BRANCH 2>&1 | Out-Null
-if ($LASTEXITCODE -ne 0) { Err "Impossibile fare checkout di '$DEV_BRANCH'." }
+git checkout $DEV_BRANCH | Out-Null
 
 $status = git status --porcelain
 if ($status) {
