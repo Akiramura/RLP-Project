@@ -121,13 +121,11 @@ $bundleDir = "src-tauri\target\release\bundle"
 $msiFile = Get-ChildItem "$bundleDir\msi\*.msi" | Select-Object -First 1
 if (-not $msiFile) { Err "File .msi non trovato in $bundleDir\msi\" }
 
-# .msi.zip (per l'updater)
-$msiZip = Get-ChildItem "$bundleDir\msi\*.msi.zip" | Select-Object -First 1
-if (-not $msiZip) { Err "File .msi.zip non trovato. Assicurati che 'createUpdaterArtifacts' sia true in tauri.conf.json" }
+$msiSig = Get-ChildItem "$bundleDir\msi\*.sig" | Select-Object -First 1
+if (-not $msiSig) { Err "File .sig non trovato. Assicurati che TAURI_SIGNING_PRIVATE_KEY sia impostato." }
 
-# .msi.zip.sig (firma per l'updater)
-$msiSig = Get-ChildItem "$bundleDir\msi\*.msi.zip.sig" | Select-Object -First 1
-if (-not $msiSig) { Err "File .sig non trovato. Assicurati che TAURI_PRIVATE_KEY sia impostato." }
+$nsisFile = Get-ChildItem "$bundleDir\nsis\*-setup.exe" | Select-Object -First 1
+$nsisSig  = Get-ChildItem "$bundleDir\nsis\*.sig" | Select-Object -First 1
 
 $signature = Get-Content $msiSig.FullName -Raw
 
@@ -147,7 +145,7 @@ $latestJson = @{
     pub_date = (Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ")
     platforms = @{
         "windows-x86_64" = @{
-            url       = "$downloadBase/$($msiZip.Name)"
+            url       = "$downloadBase/$($msiFile.Name)"
             signature = $signature.Trim()
         }
     }
@@ -163,7 +161,6 @@ Log "Creazione GitHub Release v$Version..."
 # Crea la release e carica i file con GitHub CLI
 gh release create "v$Version" `
     $msiFile.FullName `
-    $msiZip.FullName `
     $msiSig.FullName `
     $latestJsonPath `
     --repo "$GITHUB_OWNER/$GITHUB_REPO" `
