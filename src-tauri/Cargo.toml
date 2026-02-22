@@ -1,6 +1,6 @@
 [package]
 name = "rlp-project"
-version = "1.0.3"
+version = "1.0.4"
 description = ""
 authors = ["Akiramura"]
 edition = "2021"
