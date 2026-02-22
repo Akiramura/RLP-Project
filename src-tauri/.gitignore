@@ -21,6 +21,12 @@
 *.env
 .cargo/config.toml
 echo ".cargo/config.toml"
+~/.tauri/
+.tauri/
+*.key
+*.key.pub
+release.ps1
+latest.json
 
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs
