@@ -5,7 +5,8 @@ import { ProfileTab } from "./components/profile-tab";
 import { MatchHistoryTab } from "./components/match-history-tab";
 import { ChampionMetaTab } from "./components/champion-meta-tab";
 import { MetaTab } from "./components/meta-tab";
-import { User, History, TrendingUp, Search, BarChart2, Swords, Tv } from "lucide-react";
+import { MasteriesTab } from "./components/masteries-tab";
+import { User, History, TrendingUp, Search, BarChart2, Swords, Tv, Star } from "lucide-react";
 import { Input } from "./components/ui/input";
 import { Button } from "./components/ui/button";
 import "./App.css";
@@ -579,6 +580,13 @@ export default function App() {
                             Match History
                         </TabsTrigger>
                         <TabsTrigger
+                            value="masteries"
+                            className="data-[state=active]:bg-blue-600 data-[state=active]:text-white"
+                        >
+                            <Star className="w-4 h-4 mr-2" />
+                            Maestrie
+                        </TabsTrigger>
+                        <TabsTrigger
                             value="meta"
                             className="data-[state=active]:bg-blue-600 data-[state=active]:text-white"
                         >
@@ -698,6 +706,13 @@ export default function App() {
                         )}
                     </TabsContent>
 
+                    <TabsContent value="masteries">
+                        <MasteriesTab
+                            puuid={searchData?.puuid ?? myPuuid}
+                            profile={activeProfile}
+                        />
+                    </TabsContent>
+
                     <TabsContent value="meta">
                         <ChampionMetaTab
                             matches={activeMatches}
@@ -720,7 +735,7 @@ export default function App() {
                     </TabsContent>
 
                     <TabsContent value="live-game">
-                        <LiveGameTab puuidOverride={liveGamePuuid} />
+                        <LiveGameTab puuidOverride={liveGamePuuid} myPuuid={myPuuid} />
                     </TabsContent>
 
                 </Tabs>

@@ -12,9 +12,9 @@
   "app": {
     "windows": [
       {
-        "title": "rlp-project",
-        "width": 800,
-        "height": 600
+        "title": "RLP - Analytics",
+        "width": 1920,
+        "height": 1080
       }
     ],
     "security": {

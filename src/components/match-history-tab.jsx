@@ -290,7 +290,7 @@ function MatchCard({ match, myPuuid, mySummonerName, onPlayerClick }) {
                 </div>
 
                 {/* Items */}
-                <div className="flex-1 min-w-0 hidden lg:block">
+                <div className="flex-1 min-w-0">
                     <ItemRow items={items} />
                 </div>
 
@@ -319,10 +319,6 @@ function MatchCard({ match, myPuuid, mySummonerName, onPlayerClick }) {
             {/* Expanded */}
             {open && (
                 <div className="px-3 pb-3 pt-1 border-t border-slate-800 space-y-3">
-                    <div className="lg:hidden">
-                        <p className="text-slate-500 text-xs mb-1">Items</p>
-                        <ItemRow items={items} />
-                    </div>
                     <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-slate-400">
                         <span>{totalMinionsKilled} CS{csPerMin > 0 ? ` (${csPerMin}/m)` : ""}</span>
                         {goldEarned > 0 && <span className="text-yellow-600">{(goldEarned / 1000).toFixed(1)}k gold</span>}

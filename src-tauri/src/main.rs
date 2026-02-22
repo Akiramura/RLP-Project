@@ -972,6 +972,12 @@ fn split_csv(s: &str) -> Vec<String> {
     result
 }
 
+/// Alias per compatibilità con il frontend che chiama "get_rlp_matches"
+#[tauri::command]
+async fn get_rlp_matches(summoner_id: String, region: String, limit: u32) -> Result<Value, String> {
+    get_opgg_matches(summoner_id, region, limit).await
+}
+
 #[tauri::command]
 async fn get_opgg_matches(summoner_id: String, region: String, limit: u32) -> Result<Value, String> {
     let client = Client::builder()
@@ -1141,17 +1147,142 @@ fn spell_id_to_ddragon(id: u64) -> &'static str {
     }
 }
 
-/// Chiama Spectator-V5. Ritorna None se il giocatore non è in game (404/403).
+/// Chiama la Live Client Data API locale (porta 2999) — disponibile SOLO quando
+/// sei personalmente in partita. Non richiede API key.
+async fn fetch_live_client_data(client: &Client) -> Option<Value> {
+    // /liveclientdata/allgamedata contiene tutto: giocatori, score, eventi
+    let url = "https://127.0.0.1:2999/liveclientdata/allgamedata";
+    let res = client.get(url).send().await.ok()?;
+    if !res.status().is_success() { return None; }
+    let data: Value = res.json().await.ok()?;
+    // Se non ha "allPlayers" non è una risposta valida
+    if data["allPlayers"].as_array().is_none() { return None; }
+    Some(data)
+}
+
+/// Normalizza la risposta della Live Client Data API nel formato interno.
+fn build_live_game_from_lcd(lcd: &Value, my_summoner_name: &str) -> Value {
+    let game_data  = &lcd["gameData"];
+    let queue_id   = game_data["gameMode"].as_str().unwrap_or("");
+    let queue_type = match queue_id {
+        "CLASSIC"  => "Normal/Ranked",
+        "ARAM"     => "ARAM",
+        "TUTORIAL" => "Tutorial",
+        _          => queue_id,
+    }.to_string();
+
+    let game_time_f = game_data["gameTime"].as_f64().unwrap_or(0.0);
+    let game_length = game_time_f as u64;
+
+    let empty = vec![];
+    let all_players = lcd["allPlayers"].as_array().unwrap_or(&empty);
+
+    // Identifica il team del giocatore corrente
+    let my_team = all_players.iter()
+        .find(|p| {
+            let name = p["summonerName"].as_str().unwrap_or("");
+            name.eq_ignore_ascii_case(my_summoner_name) ||
+            name.eq_ignore_ascii_case(my_summoner_name.split('#').next().unwrap_or(""))
+        })
+        .and_then(|p| p["team"].as_str())
+        .unwrap_or("ORDER");
+
+    let players: Vec<Value> = all_players.iter().map(|p| {
+        let name      = p["summonerName"].as_str().unwrap_or("").to_string();
+        let champ     = p["championName"].as_str().unwrap_or("").to_string();
+        let team_str  = p["team"].as_str().unwrap_or("ORDER");
+        let is_me     = name.eq_ignore_ascii_case(my_summoner_name)
+            || name.eq_ignore_ascii_case(my_summoner_name.split('#').next().unwrap_or(""));
+
+        // Spell mapping LCD → DDragon
+        fn map_spell(s: &str) -> &str {
+            match s {
+                "SummonerFlash"     => "SummonerFlash",
+                "SummonerDot"       => "SummonerDot",
+                "SummonerTeleport"  => "SummonerTeleport",
+                "SummonerBarrier"   => "SummonerBarrier",
+                "SummonerExhaust"   => "SummonerExhaust",
+                "SummonerHaste"     => "SummonerHaste",
+                "SummonerHeal"      => "SummonerHeal",
+                "SummonerBoost"     => "SummonerBoost",
+                "SummonerSmite"     => "SummonerSmite",
+                "SummonerMana"      => "SummonerMana",
+                "SummonerSnowball"  => "SummonerSnowball",
+                other               => other,
+            }
+        }
+
+        let spell1 = p["summonerSpells"]["summonerSpellOne"]["displayName"]
+            .as_str().unwrap_or("SummonerFlash");
+        let spell2 = p["summonerSpells"]["summonerSpellTwo"]["displayName"]
+            .as_str().unwrap_or("SummonerFlash");
+
+        json!({
+            "summoner_name":   name,
+            "puuid":           "",
+            "champion_id":     0,
+            "champion_name":   champ,
+            "profile_icon_id": 0,
+            "team":            team_str,
+            "spell1":          map_spell(spell1),
+            "spell2":          map_spell(spell2),
+            "tier":            "",
+            "rank":            "",
+            "lp":              0,
+            "is_me":           is_me,
+        })
+    }).collect();
+
+    // Ban dalla LCD (non sempre disponibili)
+    let bans_blue = lcd["teamData"]["bannedChampions"].as_array()
+        .unwrap_or(&empty).iter()
+        .map(|b| json!({
+            "champion_id": b["championId"].as_i64().unwrap_or(-1),
+            "team": "ORDER",
+            "pick_turn": b["pickTurn"].as_u64().unwrap_or(0),
+        })).collect::<Vec<_>>();
+
+    json!({
+        "in_game":          true,
+        "game_time":        game_length,
+        "game_start_time":  0,
+        "queue_type":       queue_type,
+        "game_id":          0,
+        "banned_champions": bans_blue,
+        "players":          players,
+        "duo_pairs":        [],
+        "_source":          "lcd",
+    })
+}
+
+/// Chiama Spectator-V5. L'endpoint /by-summoner/ in V5 accetta il PUUID (non più il summoner ID cifrato).
 async fn fetch_spectator(puuid: &str, client: &Client) -> Option<Value> {
     let url = format!(
         "https://euw1.api.riotgames.com/lol/spectator/v5/active-games/by-summoner/{}",
         puuid
     );
-    let res  = client.get(&url).header("X-Riot-Token", riot_api_key()).send().await.ok()?;
+    let res = match client.get(&url).header("X-Riot-Token", riot_api_key()).send().await {
+        Ok(r)  => r,
+        Err(e) => { eprintln!("[Spectator] Errore rete: {}", e); return None; }
+    };
     let code = res.status().as_u16();
-    if code == 404 || code == 403 { return None; }
-    let data: Value = res.json().await.ok()?;
-    if data.get("status").is_some() { return None; }
+    eprintln!("[Spectator] HTTP {} per puuid={}", code, &puuid[..puuid.len().min(20)]);
+    if code == 404 || code == 403 || code == 400 { return None; }
+    if code != 200 {
+        let body = res.text().await.unwrap_or_default();
+        eprintln!("[Spectator] Risposta non-200: {}", &body[..body.len().min(300)]);
+        return None;
+    }
+    let data: Value = match res.json().await {
+        Ok(v)  => v,
+        Err(e) => { eprintln!("[Spectator] JSON parse error: {}", e); return None; }
+    };
+    if data.get("status").is_some() {
+        eprintln!("[Spectator] Risposta errore Riot: {:?}", data["status"]);
+        return None;
+    }
+    eprintln!("[Spectator] OK — gameId={}, participants={}",
+        data["gameId"], data["participants"].as_array().map(|a| a.len()).unwrap_or(0));
     Some(data)
 }
 
@@ -1247,6 +1378,48 @@ async fn build_live_game_response(raw: &Value, my_puuid: &str, client: &Client) 
         })
         .collect();
 
+    // ── Duo detection ────────────────────────────────────────────────────────
+    // Controlla nelle recenti partite (Neon cache) chi appare spesso con "me"
+    let mut duo_pairs: Vec<Value> = vec![];
+    if !my_puuid.is_empty() {
+        // Recupera match recenti del giocatore dalla cache Neon
+        if let Some(pool) = get_pool().await {
+            if let Ok(pg) = pool.get().await {
+                // Trova le ultime 20 partite dove appare my_puuid
+                if let Ok(rows) = pg.query(
+                    "SELECT data::text FROM match_cache WHERE data::text LIKE $1 LIMIT 20",
+                    &[&format!("%{}%", my_puuid)],
+                ).await {
+                    let mut coplay: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+                    for row in &rows {
+                        let raw: String = row.get(0);
+                        if let Ok(m) = serde_json::from_str::<Value>(&raw) {
+                            let participants = m["info"]["participants"].as_array()
+                                .cloned().unwrap_or_default();
+                            let my_team = participants.iter()
+                                .find(|p| p["puuid"].as_str() == Some(my_puuid))
+                                .and_then(|p| p["teamId"].as_u64());
+                            if let Some(tid) = my_team {
+                                for p in &participants {
+                                    let puuid = p["puuid"].as_str().unwrap_or("");
+                                    if puuid != my_puuid && p["teamId"].as_u64() == Some(tid) {
+                                        *coplay.entry(puuid.to_string()).or_insert(0) += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Considera duo chi ha giocato >= 3 partite insieme
+                    for (puuid, count) in &coplay {
+                        if *count >= 3 {
+                            duo_pairs.push(json!([my_puuid, puuid]));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     json!({
         "in_game":         true,
         "game_time":       game_length,
@@ -1255,10 +1428,12 @@ async fn build_live_game_response(raw: &Value, my_puuid: &str, client: &Client) 
         "game_id":         raw["gameId"],
         "banned_champions": banned,
         "players":         players,
+        "duo_pairs":       duo_pairs,
     })
 }
 
-/// Live Game per il giocatore loggato: legge puuid dal LCU, poi Spectator-V5.
+/// Live Game per il giocatore loggato: prova LCD (porta 2999) e Spectator V5 in parallelo,
+/// usa il primo che risponde positivamente.
 #[tauri::command]
 async fn get_live_game() -> Result<Value, String> {
     let lock_path = get_lockfile_path().ok_or("CLIENT_CLOSED")?;
@@ -1266,28 +1441,92 @@ async fn get_live_game() -> Result<Value, String> {
     let parts: Vec<&str> = content.split(':').collect();
     if parts.len() < 4 { return Err("CLIENT_CLOSED".into()); }
     let port     = parts[2];
-    let password = parts[3];
+    let password = parts[3].trim_end_matches('\n').trim_end_matches('\r');
     let auth     = general_purpose::STANDARD.encode(format!("riot:{}", password));
     let client   = Client::builder().danger_accept_invalid_certs(true).build().unwrap();
 
+    // Legge il nome summoner + puuid dal LCU
     let me: Value = client
         .get(&format!("https://127.0.0.1:{}/lol-summoner/v1/current-summoner", port))
         .header("Authorization", format!("Basic {}", auth))
         .send().await.map_err(|_| "CLIENT_CLOSED")?
         .json().await.unwrap_or(json!({}));
 
-    let my_puuid = me["puuid"].as_str().unwrap_or("").to_string();
+    let my_puuid         = me["puuid"].as_str().unwrap_or("").to_string();
+    let my_summoner_name = me["gameName"].as_str().unwrap_or("").to_string();
     if my_puuid.is_empty() { return Err("CLIENT_CLOSED".into()); }
 
-    match fetch_spectator(&my_puuid, &client).await {
+    // Prova LCD e Spectator in parallelo
+    let client_lcd       = client.clone();
+    let client_spectator = client.clone();
+    let puuid_for_spec   = my_puuid.clone();
+    let name_for_lcd     = my_summoner_name.clone();
+
+    let lcd_handle = tokio::spawn(async move {
+        fetch_live_client_data(&client_lcd).await
+            .map(|lcd| build_live_game_from_lcd(&lcd, &name_for_lcd))
+    });
+
+    let spec_handle = tokio::spawn(async move {
+        match fetch_spectator(&puuid_for_spec, &client_spectator).await {
+            Some(raw) => Some(raw),
+            None      => None,
+        }
+    });
+
+    // Aspetta LCD per primo (risposta locale, ~1ms), poi Spectator
+    let lcd_result = lcd_handle.await.unwrap_or(None);
+    if let Some(mut resp) = lcd_result {
+        eprintln!("[LiveGame] Fonte: LCD (porta 2999)");
+
+        // Arricchisce con rank: usa i names che hanno il tag (#) per ricavare PUUID
+        let players_snap = resp["players"].as_array().cloned().unwrap_or_default();
+        let rank_handles: Vec<_> = players_snap.iter().map(|p| {
+            let name    = p["summoner_name"].as_str().unwrap_or("").to_string();
+            let client2 = client.clone();
+            tokio::spawn(async move {
+                let parts2: Vec<&str> = name.splitn(2, '#').collect();
+                let puuid = if parts2.len() == 2 {
+                    fetch_puuid(parts2[0], parts2[1], &client2).await.unwrap_or_default()
+                } else { String::new() };
+                if puuid.is_empty() { return (name, String::new(), String::new(), 0i64); }
+                let (tier, rank, lp) = fetch_ranked_entry(puuid, client2).await;
+                (name, tier, rank, lp)
+            })
+        }).collect();
+
+        let mut rank_map: std::collections::HashMap<String, (String, String, i64)> = std::collections::HashMap::new();
+        for h in rank_handles {
+            if let Ok((name, tier, rank, lp)) = h.await {
+                if !tier.is_empty() { rank_map.insert(name, (tier, rank, lp)); }
+            }
+        }
+        if let Some(arr) = resp["players"].as_array_mut() {
+            for p in arr.iter_mut() {
+                let name = p["summoner_name"].as_str().unwrap_or("").to_string();
+                if let Some((tier, rank, lp)) = rank_map.get(&name) {
+                    p["tier"] = json!(tier);
+                    p["rank"] = json!(rank);
+                    p["lp"]   = json!(lp);
+                }
+            }
+        }
+        return Ok(resp);
+    }
+
+    // LCD non disponibile → aspetta Spectator
+    eprintln!("[LiveGame] LCD non disponibile, uso Spectator V5");
+    match spec_handle.await.unwrap_or(None) {
         None      => Ok(json!({ "in_game": false, "game_time": 0, "queue_type": "", "players": [] })),
         Some(raw) => Ok(build_live_game_response(&raw, &my_puuid, &client).await),
     }
 }
 
-/// Live Game per qualsiasi summoner (dalla tab profilo).
+/// Live Game per qualsiasi summoner (dalla tab profilo / ricerca).
+/// Non può usare LCD (solo per il giocatore locale), usa Spectator V5.
 #[tauri::command]
 async fn check_live_game(puuid: String) -> Result<Value, String> {
+    eprintln!("[check_live_game] Checking puuid={}", &puuid[..puuid.len().min(20)]);
     let client = Client::builder().danger_accept_invalid_certs(true).build().unwrap();
     match fetch_spectator(&puuid, &client).await {
         None      => Ok(json!({ "in_game": false, "game_time": 0, "queue_type": "", "players": [] })),
@@ -1296,14 +1535,45 @@ async fn check_live_game(puuid: String) -> Result<Value, String> {
 }
 
 
+/// Recupera le maestrie del summoner tramite Riot API.
+/// Accetta sia il puuid diretto che game_name+tag_line (separati da '#').
+#[tauri::command]
+async fn get_summoner_masteries(puuid: String) -> Result<Value, String> {
+    let client = Client::builder()
+        .danger_accept_invalid_certs(true)
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap();
+
+    let url = format!(
+        "https://euw1.api.riotgames.com/lol/champion-mastery/v4/champion-masteries/by-puuid/{}/top?count=20",
+        puuid
+    );
+
+    let res = client
+        .get(&url)
+        .header("X-Riot-Token", riot_api_key())
+        .send().await
+        .map_err(|e| e.to_string())?;
+
+    let status = res.status().as_u16();
+    if status == 404 { return Ok(json!([])); }
+    if status != 200 {
+        return Err(format!("Riot API errore {}", status));
+    }
+
+    let masteries: Value = res.json().await.map_err(|_| "Errore JSON masteries")?;
+    Ok(masteries)
+}
+
 fn main() {
 
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             get_profiles, get_more_matches, search_summoner, get_opgg_data,
             get_champ_select_session, auto_import_build, list_opgg_tools,
-            debug_champ_select_slot, get_tier_list, get_opgg_matches,
-            get_live_game, check_live_game
+            debug_champ_select_slot, get_tier_list, get_opgg_matches, get_rlp_matches,
+            get_live_game, check_live_game, get_summoner_masteries
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
