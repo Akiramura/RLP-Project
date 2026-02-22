@@ -17,6 +17,13 @@ dist-ssr
 .env.local
 .cargo/config.toml
 echo ".cargo/config.toml"
+~/.tauri/
+.tauri/
+*.key
+*.key.pub
+release.ps1
+latest.json
+
 
 # Editor directories and files
 .vscode/*
@@ -28,6 +35,7 @@ echo ".cargo/config.toml"
 *.njsproj
 *.sln
 *.sw?
-. v s /  
+. v s / 
+ 
  .vs/
 .vs/
