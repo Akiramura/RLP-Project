@@ -61,13 +61,18 @@ export function ProfileTab({ profile, rankedSolo, rankedFlex, matches, myPuuid, 
         .map(([name, stats]) => ({
             name,
             games: stats.games,
+            wins: stats.wins,
+            losses: stats.games - stats.wins,
             winRate: ((stats.wins / stats.games) * 100).toFixed(1),
             kda: stats.deaths === 0
                 ? "Perfect"
                 : ((stats.kills + stats.assists) / stats.deaths).toFixed(2),
+            avgKills: (stats.kills / stats.games).toFixed(1),
+            avgDeaths: (stats.deaths / stats.games).toFixed(1),
+            avgAssists: (stats.assists / stats.games).toFixed(1),
         }))
         .sort((a, b) => b.games - a.games)
-        .slice(0, 3);
+        .slice(0, 7);
 
     // --- Calcola Performance Stats dai match reali ---
     const perfStats = matches && matches.length > 0 ? (() => {
@@ -132,8 +137,8 @@ export function ProfileTab({ profile, rankedSolo, rankedFlex, matches, myPuuid, 
                                 <Button
                                     onClick={() => onViewLiveGame(myPuuid)}
                                     className={`text-white text-xs px-3 py-1 h-7 flex items-center gap-1.5 relative ${isInLiveGame
-                                            ? "bg-red-600 hover:bg-red-500 shadow-lg shadow-red-900/40"
-                                            : "bg-slate-700 hover:bg-slate-600"
+                                        ? "bg-red-600 hover:bg-red-500 shadow-lg shadow-red-900/40"
+                                        : "bg-slate-700 hover:bg-slate-600"
                                         }`}
                                 >
                                     <Tv className="w-3 h-3" />
@@ -220,35 +225,60 @@ export function ProfileTab({ profile, rankedSolo, rankedFlex, matches, myPuuid, 
                 </Card>
             </div>
 
-            {/* Top Champions */}
+            {/* Most Played Champions — stile OP.GG */}
             {topChampions.length > 0 && (
                 <Card className="p-6 bg-slate-900 border-slate-700">
-                    <h3 className="text-xl font-bold text-white mb-4">Top Champions</h3>
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                        {topChampions.map(champ => (
-                            <div key={champ.name} className="bg-slate-800 rounded-lg p-4 flex flex-col gap-3">
-                                <div className="flex items-center gap-3">
+                    <h3 className="text-xl font-bold text-white mb-4">Most Played Champions</h3>
+                    <div className="space-y-2">
+                        {topChampions.map((champ, idx) => {
+                            const wrNum = parseFloat(champ.winRate);
+                            const wrColor = wrNum >= 60 ? "text-green-400" : wrNum >= 50 ? "text-blue-400" : "text-red-400";
+                            const barColor = wrNum >= 60 ? "bg-green-500" : wrNum >= 50 ? "bg-blue-500" : "bg-red-500";
+                            return (
+                                <div key={champ.name} className="flex items-center gap-3 p-2 rounded-lg hover:bg-slate-800/60 transition-colors">
+                                    {/* Rank number */}
+                                    <span className="text-slate-600 text-xs w-4 shrink-0">{idx + 1}</span>
+                                    {/* Champion icon */}
                                     <img
                                         src={`https://ddragon.leagueoflegends.com/cdn/${PATCH}/img/champion/${champ.name}.png`}
                                         alt={champ.name}
-                                        className="w-12 h-12 rounded-lg object-cover"
+                                        className="w-10 h-10 rounded-lg object-cover shrink-0"
                                         onError={e => { e.target.style.display = "none"; }}
                                     />
-                                    <div>
-                                        <p className="text-white font-bold">{champ.name}</p>
-                                        <p className="text-slate-400 text-xs">{champ.games} games</p>
+                                    {/* Name + games */}
+                                    <div className="w-28 shrink-0">
+                                        <p className="text-white font-semibold text-sm truncate">{champ.name}</p>
+                                        <p className="text-slate-500 text-xs">{champ.games} partite</p>
+                                    </div>
+                                    {/* WR bar */}
+                                    <div className="flex-1 min-w-0">
+                                        <div className="flex justify-between text-xs mb-1">
+                                            <span className="text-slate-400">{champ.wins}V {champ.losses}S</span>
+                                            <span className={`font-bold ${wrColor}`}>{champ.winRate}%</span>
+                                        </div>
+                                        <div className="h-1.5 bg-slate-700 rounded-full overflow-hidden">
+                                            <div className={`h-full rounded-full ${barColor}`} style={{ width: `${champ.winRate}%` }} />
+                                        </div>
+                                    </div>
+                                    {/* KDA */}
+                                    <div className="text-right shrink-0 w-24">
+                                        <p className="text-white text-sm font-mono">
+                                            <span className="text-slate-300">{champ.avgKills}</span>
+                                            <span className="text-slate-500"> / </span>
+                                            <span className="text-red-400">{champ.avgDeaths}</span>
+                                            <span className="text-slate-500"> / </span>
+                                            <span className="text-slate-300">{champ.avgAssists}</span>
+                                        </p>
+                                        <p className="text-xs">
+                                            <span className={parseFloat(champ.kda) >= 3 || champ.kda === "Perfect" ? "text-yellow-400" : parseFloat(champ.kda) >= 2 ? "text-blue-400" : "text-slate-500"}>
+                                                {champ.kda}
+                                            </span>
+                                            <span className="text-slate-600"> KDA</span>
+                                        </p>
                                     </div>
                                 </div>
-                                <div className="flex justify-between text-sm">
-                                    <span className="text-slate-400">Win Rate</span>
-                                    <span className="text-green-400 font-bold">{champ.winRate}%</span>
-                                </div>
-                                <div className="flex justify-between text-sm">
-                                    <span className="text-slate-400">KDA</span>
-                                    <span className="text-blue-400 font-bold">{champ.kda}</span>
-                                </div>
-                            </div>
-                        ))}
+                            );
+                        })}
                     </div>
                 </Card>
             )}

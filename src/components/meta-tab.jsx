@@ -11,16 +11,32 @@ import { PATCH } from "./constants";
 const DDRAGON_NAME_OVERRIDES = {
     "Kai'Sa": "Kaisa",
     "Nunu & Willump": "Nunu",
+    "Nunu&Willump": "Nunu",
+    "NunuWillump": "Nunu",
     "Wukong": "MonkeyKing",
     "Renata Glasc": "Renata",
     "Bel'Veth": "Belveth",
     "Cho'Gath": "Chogath",
     "Fiddlesticks": "FiddleSticks",
     "Kha'Zix": "Khazix",
+    "KhaZix": "Khazix",
     "Kog'Maw": "KogMaw",
     "LeBlanc": "Leblanc",
     "Rek'Sai": "RekSai",
     "Vel'Koz": "Velkoz",
+    "VelKoz": "Velkoz",
+    "Dr. Mundo": "DrMundo",
+    "Tahm Kench": "TahmKench",
+    "Twisted Fate": "TwistedFate",
+    "Master Yi": "MasterYi",
+    "Miss Fortune": "MissFortune",
+    "Lee Sin": "LeeSin",
+    "Jarvan IV": "JarvanIV",
+    "Xin Zhao": "XinZhao",
+    "Aurelion Sol": "AurelionSol",
+    "K'Sante": "KSante",
+    "Briar": "Briar",
+    "Mel": "Mel",
 };
 
 function normalizeName(raw) {
@@ -372,7 +388,7 @@ export function MetaTab({ onMetaDataReady }) {
             {loading && champions.length === 0 && (
                 <div className="flex items-center justify-center h-48 gap-3">
                     <Loader2 className="w-6 h-6 text-blue-400 animate-spin" />
-                    <p className="text-slate-400">Caricamento dati OP.GG...</p>
+                    <p className="text-slate-400">Caricamento dati...</p>
                 </div>
             )}
 
@@ -472,7 +488,7 @@ export function MetaTab({ onMetaDataReady }) {
             )}
 
             <p className="text-center text-slate-600 text-xs pb-4">
-                Dati: OP.GG EUW Emerald+ • {lastUpdated?.toLocaleDateString("it-IT") || "—"}
+                Dati: EUW Emerald+ • {lastUpdated?.toLocaleDateString("it-IT") || "—"}
             </p>
         </div>
     );

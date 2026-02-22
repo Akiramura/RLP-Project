@@ -40,6 +40,39 @@ const TIER_SHORT = {
 
 const NO_DIVISION = ["MASTER", "GRANDMASTER", "CHALLENGER"];
 
+// Normalizza nomi campione LCD → DDragon (LCD usa nomi estesi, DDragon usa chiavi)
+const LCD_CHAMP_NAME_MAP = {
+    "Nunu & Willump": "Nunu",
+    "Wukong": "MonkeyKing",
+    "Renata Glasc": "Renata",
+    "Bel'Veth": "Belveth",
+    "Cho'Gath": "Chogath",
+    "Fiddlesticks": "FiddleSticks",
+    "Kha'Zix": "Khazix",
+    "Kog'Maw": "KogMaw",
+    "LeBlanc": "Leblanc",
+    "Rek'Sai": "RekSai",
+    "Vel'Koz": "Velkoz",
+    "Kai'Sa": "Kaisa",
+    "Dr. Mundo": "DrMundo",
+    "Tahm Kench": "TahmKench",
+    "Twisted Fate": "TwistedFate",
+    "Master Yi": "MasterYi",
+    "Miss Fortune": "MissFortune",
+    "Lee Sin": "LeeSin",
+    "Jarvan IV": "JarvanIV",
+    "Xin Zhao": "XinZhao",
+    "Aurelion Sol": "AurelionSol",
+    "K'Sante": "KSante",
+};
+
+function normalizeLcdChampName(raw) {
+    if (!raw) return raw;
+    if (LCD_CHAMP_NAME_MAP[raw]) return LCD_CHAMP_NAME_MAP[raw];
+    // Rimuovi apostrofi, spazi, punti, &
+    return raw.replace(/'/g, "").replace(/\s+/g, "").replace(/\./g, "").replace("&", "");
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 const champUrl = name => name ? `https://ddragon.leagueoflegends.com/cdn/${PATCH}/img/champion/${name}.png` : null;
@@ -139,9 +172,10 @@ function BanRow({ bans, champIdMap, side }) {
     );
 }
 
-function PlayerRow({ player, champIdMap, side }) {
+function PlayerRow({ player, champIdMap, side, duoWith }) {
     const isLeft = side === "ORDER";
-    const champName = player.champion_name || champIdMap[player.champion_id] || "";
+    // champion_name può essere già il nome DDragon (Spectator) oppure il nome esteso LCD
+    const champName = normalizeLcdChampName(player.champion_name) || champIdMap[player.champion_id] || "";
 
     return (
         <div className={`flex items-center gap-2 py-1.5 px-2 rounded-xl transition-colors
@@ -199,10 +233,17 @@ function PlayerRow({ player, champIdMap, side }) {
 
             {/* Nome + Rank */}
             <div className={`flex-1 min-w-0 ${isLeft ? "text-left" : "text-right"}`}>
-                <p className={`text-sm font-semibold truncate leading-tight
-                    ${player.is_me ? "text-blue-300" : "text-slate-100"}`}>
-                    {player.summoner_name || "—"}
-                </p>
+                <div className={`flex items-center gap-1 ${isLeft ? "" : "justify-end"}`}>
+                    <p className={`text-sm font-semibold truncate leading-tight
+                        ${player.is_me ? "text-blue-300" : "text-slate-100"}`}>
+                        {player.summoner_name || "—"}
+                    </p>
+                    {duoWith && (
+                        <span className="text-[9px] font-bold px-1 py-0.5 rounded bg-pink-900/60 text-pink-300 border border-pink-700/50 shrink-0" title={`Duo con ${duoWith}`}>
+                            DUO
+                        </span>
+                    )}
+                </div>
                 <div className={`mt-0.5 ${isLeft ? "" : "flex justify-end"}`}>
                     <RankBadge tier={player.tier} rank={player.rank} lp={player.lp} />
                 </div>
@@ -219,7 +260,7 @@ function PlayerRow({ player, champIdMap, side }) {
     );
 }
 
-function TeamPanel({ players, bans, side, champIdMap }) {
+function TeamPanel({ players, bans, side, champIdMap, duoMap }) {
     const isOrder = side === "ORDER";
     const dotColor = isOrder ? "bg-blue-500" : "bg-red-500";
     const label = isOrder ? "TEAM BLU" : "TEAM ROSSO";
@@ -250,7 +291,7 @@ function TeamPanel({ players, bans, side, champIdMap }) {
 
             <div className="space-y-0.5 mt-2">
                 {players.map((p, i) => (
-                    <PlayerRow key={i} player={p} champIdMap={champIdMap} side={side} />
+                    <PlayerRow key={i} player={p} champIdMap={champIdMap} side={side} duoWith={duoMap?.[p.puuid]} />
                 ))}
                 {players.length === 0 && (
                     <p className="text-slate-600 text-xs text-center py-4">Nessun giocatore</p>
@@ -262,7 +303,7 @@ function TeamPanel({ players, bans, side, champIdMap }) {
 
 // ── Tab principale ────────────────────────────────────────────────────────────
 
-export function LiveGameTab({ puuidOverride = null }) {
+export function LiveGameTab({ puuidOverride = null, myPuuid = null }) {
     const [data, setData] = useState(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
@@ -274,15 +315,19 @@ export function LiveGameTab({ puuidOverride = null }) {
     const pollRef = useRef(null);
     const tickRef = useRef(null);
 
+    // Se puuidOverride è il nostro stesso puuid, usiamo get_live_game (LCD + Spectator)
+    // Se è un altro giocatore, usiamo check_live_game (solo Spectator V5)
+    // Se è null, usiamo get_live_game
+    const isSelf = !puuidOverride || (myPuuid && puuidOverride === myPuuid);
+
     const fetchData = useCallback(async () => {
         try {
-            const res = puuidOverride
-                ? await invoke("check_live_game", { puuid: puuidOverride })
-                : await invoke("get_live_game");
+            const res = isSelf
+                ? await invoke("get_live_game")
+                : await invoke("check_live_game", { puuid: puuidOverride });
             setData(res);
             setError(null);
             if (res?.in_game) {
-                // Resetta elapsed quando riceviamo nuovi dati
                 setElapsed(0);
             }
         } catch (e) {
@@ -292,7 +337,7 @@ export function LiveGameTab({ puuidOverride = null }) {
         } finally {
             setLoading(false);
         }
-    }, [puuidOverride]);
+    }, [puuidOverride, isSelf]);
 
     // Reset completo quando cambia il puuidOverride (fix pagina sporca)
     useEffect(() => {
@@ -378,6 +423,26 @@ export function LiveGameTab({ puuidOverride = null }) {
     const gameTimeSec = calcGameTime(data, elapsed);
     void tick; // usato per forzare re-render ogni secondo
 
+    // ── Duo detection ────────────────────────────────────────────────────────
+    // Trova il giocatore "me" e cerca chi appare spesso nella sua match history
+    // Per ora usa una logica semplice: due giocatori dello stesso team con stesso
+    // profileIconId o segnalati come duo dall'API (non disponibile) →
+    // Rilevamento da match history passata tramite prop (futuro).
+    // Per il momento segniamo come potenziale duo chi ha puuid nel duo_pairs (se presenti).
+    const duoMap = {}; // puuid → nome del duo partner
+    const myPlayer = data.players.find(p => p.is_me);
+    if (myPlayer && data.duo_pairs) {
+        for (const [a, b] of (data.duo_pairs ?? [])) {
+            if (a === myPlayer.puuid) {
+                const partner = data.players.find(p => p.puuid === b);
+                if (partner) { duoMap[b] = partner.summoner_name; duoMap[a] = myPlayer.summoner_name; }
+            } else if (b === myPlayer.puuid) {
+                const partner = data.players.find(p => p.puuid === a);
+                if (partner) { duoMap[a] = partner.summoner_name; duoMap[b] = myPlayer.summoner_name; }
+            }
+        }
+    }
+
     return (
         <div className="space-y-4">
 
@@ -418,6 +483,7 @@ export function LiveGameTab({ puuidOverride = null }) {
                     bans={bansOrder}
                     side="ORDER"
                     champIdMap={champIdMap}
+                    duoMap={duoMap}
                 />
                 <div className="flex flex-col items-center justify-center gap-1 shrink-0 pt-12">
                     <div className="w-px h-12 bg-gradient-to-b from-transparent via-slate-600 to-transparent" />
@@ -429,11 +495,14 @@ export function LiveGameTab({ puuidOverride = null }) {
                     bans={bansChaos}
                     side="CHAOS"
                     champIdMap={champIdMap}
+                    duoMap={duoMap}
                 />
             </div>
 
             <p className="text-center text-slate-700 text-xs pb-1">
-                Riot Spectator-V5 · aggiornamento ogni 30s
+                {data._source === "lcd"
+                    ? "Live Client Data API (porta 2999) · aggiornamento ogni 30s"
+                    : "Riot Spectator-V5 · aggiornamento ogni 30s"}
             </p>
         </div>
     );
