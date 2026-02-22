@@ -45,7 +45,7 @@ const STATUS_LABEL = {
     [STATUS.FETCHING]: "Recupero build...",
     [STATUS.IMPORTING]: "Importazione in corso...",
     [STATUS.DONE]: "Build importata con successo!",
-    [STATUS.ERROR]: "Errore durante l'importazione",
+    [STATUS.ERROR]: "Importazione non riuscita",
 };
 
 function StepRow({ icon: Icon, label, done, active, error }) {
@@ -82,7 +82,9 @@ export function ChampSelectTab() {
 
     function addLog(msg) {
         const ts = new Date().toLocaleTimeString("it-IT");
-        setLog(prev => [`[${ts}] ${msg}`, ...prev].slice(0, 30));
+        const line = `[${ts}] ${msg}`;
+        console.debug("[RLP champ-select]", line);
+        setLog(prev => [line, ...prev].slice(0, 30));
     }
 
     // Poll every 2.5s
@@ -135,7 +137,7 @@ export function ChampSelectTab() {
 
         try {
             setStatus(STATUS.FETCHING);
-            addLog(`Scarico build OP.GG per ${session.champion_name} ${session.assigned_position}...`);
+            addLog(`Scarico build RLP per ${session.champion_name} ${session.assigned_position}...`);
 
             const result = await invoke("auto_import_build", {
                 championName: session.champion_name,
@@ -145,7 +147,7 @@ export function ChampSelectTab() {
             setImportResult(result);
             if (result.errors && result.errors.length > 0) {
                 setStatus(STATUS.ERROR);
-                setLastError(result.errors.join("; "));
+                console.error("[RLP import] Errors:", result.errors.join("; "));
                 addLog(`Errori: ${result.errors.join(", ")}`);
             } else {
                 setStatus(STATUS.DONE);
@@ -153,7 +155,7 @@ export function ChampSelectTab() {
             }
         } catch (e) {
             setStatus(STATUS.ERROR);
-            setLastError(String(e));
+            console.error("[RLP auto-import] Error:", e);
             addLog(`Errore: ${e}`);
         } finally {
             importingRef.current = false;
@@ -208,9 +210,7 @@ export function ChampSelectTab() {
                                 status === STATUS.ERROR ? "text-red-400" : "text-blue-300"}`}>
                             {STATUS_LABEL[status]}
                         </p>
-                        {lastError && (
-                            <p className="mt-1 text-xs text-red-400">{lastError}</p>
-                        )}
+                        {/* lastError logged to console only */}
                     </div>
                 </div>
             </Card>
@@ -304,19 +304,7 @@ export function ChampSelectTab() {
                 </div>
             )}
 
-            {/* Log */}
-            {log.length > 0 && (
-                <Card className="p-4 bg-slate-950 border-slate-800">
-                    <h4 className="text-slate-500 text-xs uppercase tracking-wider mb-2">Log</h4>
-                    <div className="space-y-0.5 max-h-40 overflow-y-auto">
-                        {log.map((line, i) => (
-                            <p key={i} className={`text-xs font-mono ${i === 0 ? "text-slate-200" : "text-slate-500"}`}>
-                                {line}
-                            </p>
-                        ))}
-                    </div>
-                </Card>
-            )}
+            {/* Log box: dev only — hidden from UI */}
 
         </div>
     );

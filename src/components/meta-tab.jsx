@@ -7,9 +7,25 @@ import { Trophy, Target, Zap, TrendingUp } from 'lucide-react';
 import { PATCH } from "./constants";
 
 
-// Mappa champion_id OP.GG → nome DDragon
+// Mappa champion_id OP.GG → nome DDragon (eccezioni che normalizeName non copre)
+const DDRAGON_NAME_OVERRIDES = {
+    "Kai'Sa": "Kaisa",
+    "Nunu & Willump": "Nunu",
+    "Wukong": "MonkeyKing",
+    "Renata Glasc": "Renata",
+    "Bel'Veth": "Belveth",
+    "Cho'Gath": "Chogath",
+    "Fiddlesticks": "FiddleSticks",
+    "Kha'Zix": "Khazix",
+    "Kog'Maw": "KogMaw",
+    "LeBlanc": "Leblanc",
+    "Rek'Sai": "RekSai",
+    "Vel'Koz": "Velkoz",
+};
+
 function normalizeName(raw) {
     if (!raw) return raw;
+    if (DDRAGON_NAME_OVERRIDES[raw]) return DDRAGON_NAME_OVERRIDES[raw];
     return raw
         .replace(/'/g, "")
         .replace(/\s+/g, "")
@@ -383,8 +399,8 @@ export function MetaTab({ onMetaDataReady }) {
                                 key={l.key}
                                 onClick={() => setLane(l.key)}
                                 className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all flex items-center gap-1.5 ${lane === l.key
-                                        ? "bg-blue-600 text-white shadow"
-                                        : "text-slate-400 hover:text-white hover:bg-slate-800"
+                                    ? "bg-blue-600 text-white shadow"
+                                    : "text-slate-400 hover:text-white hover:bg-slate-800"
                                     }`}
                             >
                                 <span>{l.icon}</span>
