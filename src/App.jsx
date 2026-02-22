@@ -21,6 +21,7 @@ export default function App() {
     const [loadingMore, setLoadingMore] = useState(false);
     const matchesInitialized = useRef(false);
     const lastLoadedPuuid = useRef(null);
+    const latestMatchId = useRef(null);
 
     const [seasonFetchDone, setSeasonFetchDone] = useState(false);
     const seasonFetchRunning = useRef(false);
@@ -181,13 +182,16 @@ export default function App() {
             setProfileData(res);
             setError(null);
 
-            if (!matchesInitialized.current || lastLoadedPuuid.current !== res.puuid) {
+            const isNewPlayer = !matchesInitialized.current || lastLoadedPuuid.current !== res.puuid;
+
+            if (isNewPlayer) {
+                // Prima inizializzazione o cambio account
                 matchesInitialized.current = true;
                 lastLoadedPuuid.current = res.puuid;
                 seasonFetchRunning.current = false;
                 setSeasonFetchDone(false);
 
-                // Prova prima OP.GG (più veloce, niente rate limit Riot)
+                // Prova prima OP.GG (piu veloce, niente rate limit Riot)
                 try {
                     const summonerId = `${res.profile?.gameName}#${res.profile?.tagLine}`;
                     const opggMatches = await invoke("get_opgg_matches", {
@@ -197,6 +201,7 @@ export default function App() {
                         setAllMatches(opggMatches);
                         setMatchOffset(opggMatches.length);
                         setSeasonFetchDone(true);
+                        latestMatchId.current = opggMatches[0]?.matchId ?? opggMatches[0]?.metadata?.matchId ?? null;
                         console.log(`[OP.GG] ${opggMatches.length} partite caricate`);
                         return; // Evita il fetch Riot API
                     }
@@ -206,10 +211,62 @@ export default function App() {
 
                 // Fallback: Riot API — conserva i match raw (con info.participants)
                 if (res?.matches) {
-                    setAllMatches(res.matches.filter(m => m?.metadata || m?.info));
-                    const initialOffset = res.matches.length;
+                    const filtered = res.matches.filter(m => m?.metadata || m?.info);
+                    setAllMatches(filtered);
+                    const initialOffset = filtered.length;
                     setMatchOffset(initialOffset);
+                    latestMatchId.current = filtered[0]?.metadata?.matchId ?? null;
                     fetchSeasonMatches(res.puuid, initialOffset);
+                }
+
+            } else {
+                // Polling periodico: controlla se ci sono nuove partite
+                try {
+                    const summonerId = `${res.profile?.gameName}#${res.profile?.tagLine}`;
+                    const freshMatches = await invoke("get_opgg_matches", {
+                        summonerId, region: "euw", limit: 5
+                    });
+                    if (freshMatches && freshMatches.length > 0) {
+                        const newestId = freshMatches[0]?.matchId ?? freshMatches[0]?.metadata?.matchId;
+                        if (newestId && newestId !== latestMatchId.current) {
+                            console.log("[Refresh] Nuova partita rilevata:", newestId);
+                            latestMatchId.current = newestId;
+                            setAllMatches(prev => {
+                                const existingIds = new Set(prev.map(m => m?.matchId ?? m?.metadata?.matchId));
+                                const newOnes = freshMatches.filter(m => {
+                                    const id = m?.matchId ?? m?.metadata?.matchId;
+                                    return id && !existingIds.has(id);
+                                });
+                                return newOnes.length > 0 ? [...newOnes, ...prev] : prev;
+                            });
+                        }
+                    }
+                } catch (opggErr) {
+                    // OP.GG non disponibile: fallback su Riot API
+                    try {
+                        const more = await invoke("get_more_matches", {
+                            puuid: res.puuid,
+                            start: 0,
+                        });
+                        const fresh = more?.filter(m => m?.metadata || m?.info) ?? [];
+                        if (fresh.length > 0) {
+                            const newestId = fresh[0]?.metadata?.matchId;
+                            if (newestId && newestId !== latestMatchId.current) {
+                                console.log("[Refresh Riot] Nuova partita rilevata:", newestId);
+                                latestMatchId.current = newestId;
+                                setAllMatches(prev => {
+                                    const existingIds = new Set(prev.map(m => m?.matchId ?? m?.metadata?.matchId));
+                                    const newOnes = fresh.filter(m => {
+                                        const id = m?.metadata?.matchId;
+                                        return id && !existingIds.has(id);
+                                    });
+                                    return newOnes.length > 0 ? [...newOnes, ...prev] : prev;
+                                });
+                            }
+                        }
+                    } catch (riotErr) {
+                        console.warn("[Refresh] Impossibile controllare nuove partite:", riotErr);
+                    }
                 }
             }
         } catch (err) {
