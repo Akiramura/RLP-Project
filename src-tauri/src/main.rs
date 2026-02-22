@@ -194,24 +194,123 @@ async fn db_save_summoner(puuid: &str, profile: &Value, ranked_entries: &Value, 
     }
 }
 
-/// Tenta di recuperare i dati in modalità offline:
-/// 1. Cerca il puuid nella cache locale (cache.json)
-/// 2. Se trovato, interroga Neon (ignorando la scadenza)
-/// 3. Altrimenti usa direttamente la cache locale
+/// Recupera profilo, ranked e match via Riot API pubblica (senza LCU).
+/// Usata quando il client è chiuso per avere dati freschi.
+async fn fetch_profile_from_riot_api(
+    game_name: &str,
+    tag_line: &str,
+    client: &Client,
+) -> Option<Value> {
+    println!("[RLP] Client chiuso → fetch Riot API per {}", game_name);
+
+    let puuid = fetch_puuid(game_name, tag_line, client).await?;
+
+    // Ranked entries
+    let ranked_text = client
+        .get(&format!(
+            "https://euw1.api.riotgames.com/lol/league/v4/entries/by-puuid/{}",
+            puuid
+        ))
+        .header("X-Riot-Token", riot_api_key())
+        .send().await.ok()?
+        .text().await.unwrap_or_default();
+    let ranked_entries: Value = serde_json::from_str(&ranked_text).unwrap_or(json!([]));
+
+    // Summoner (level + icon)
+    let summoner: Value = client
+        .get(&format!(
+            "https://euw1.api.riotgames.com/lol/summoner/v4/summoners/by-puuid/{}",
+            puuid
+        ))
+        .header("X-Riot-Token", riot_api_key())
+        .send().await.ok()?
+        .json().await.unwrap_or(json!({}));
+
+    // Ultimi 10 match
+    let match_ids = fetch_match_ids(&puuid, 0, 10, client).await;
+    let mut match_details: Vec<Value> = vec![];
+    for id in match_ids.iter() {
+        match_details.push(fetch_match_detail(id, client).await);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    // Normalizza ranked_entries (rank → division per compatibilità mapRanked)
+    let normalized_entries: Vec<Value> = ranked_entries
+        .as_array().unwrap_or(&vec![])
+        .iter().map(|e| {
+            let mut entry = e.clone();
+            if entry["division"].is_null() || entry["division"].as_str().unwrap_or("") == "" {
+                if let Some(div) = e["rank"].as_str() {
+                    entry["division"] = json!(div);
+                }
+            }
+            entry
+        }).collect();
+
+    let queues = normalized_entries.clone();
+
+    let profile = json!({
+        "gameName": game_name,
+        "tagLine": tag_line,
+        "summonerLevel": summoner["summonerLevel"],
+        "profileIconId": summoner["profileIconId"],
+        "xpSinceLastLevel": 0,
+        "xpUntilNextLevel": 1,
+    });
+
+    let matches_json  = json!(match_details);
+    let ranked_json   = json!(normalized_entries);
+
+    // Salva in Neon e cache locale per usi futuri
+    db_save_summoner(&puuid, &profile, &ranked_json, &matches_json).await;
+
+    println!("[RLP] Riot API fetch completato per {} ({} match)", game_name, match_details.len());
+
+    Some(json!({
+        "puuid": puuid,
+        "profile": profile,
+        "ranked": { "queues": queues },
+        "ranked_entries": ranked_json,
+        "matches": matches_json,
+        "last_update": chrono::Utc::now().to_rfc3339()
+    }))
+}
+
+/// Tenta di recuperare i dati quando il client è chiuso:
+/// 1. Riot API pubblica (dati freschi, sempre)
+/// 2. Neon cache (ignorando scadenza, se Riot API non è raggiungibile)
+/// 3. Cache locale JSON (ultimo fallback)
 async fn offline_fallback(cached_data: &Option<Value>) -> Result<Value, String> {
-    // Prova prima con Neon se abbiamo un puuid dalla cache locale
+    // Recupera game_name e tag_line dalla cache locale per poter chiamare Riot API
     if let Some(cache) = cached_data {
+        let game_name = cache["profile"]["gameName"].as_str()
+            .or_else(|| cache["profile"]["game_name"].as_str())
+            .unwrap_or("");
+        let tag_line = cache["profile"]["tagLine"].as_str()
+            .or_else(|| cache["profile"]["tag_line"].as_str())
+            .unwrap_or("");
+
+        if !game_name.is_empty() && !tag_line.is_empty() {
+            let client = Client::builder()
+                .danger_accept_invalid_certs(true)
+                .timeout(std::time::Duration::from_secs(15))
+                .build()
+                .unwrap();
+
+            if let Some(fresh) = fetch_profile_from_riot_api(game_name, tag_line, &client).await {
+                println!("[RLP] Dati freschi da Riot API (client chiuso).");
+                return Ok(fresh);
+            }
+            println!("[RLP] Riot API non raggiungibile, provo Neon...");
+        }
+
+        // Fallback Neon
         if let Some(puuid) = cache["puuid"].as_str() {
             if !puuid.is_empty() {
                 if let Some(neon_data) = db_get_summoner_offline(puuid).await {
-                    println!("[Offline] Dati recuperati da Neon per puuid={}", puuid);
-                    // Neon ha ranked_entries come array con campo "rank".
-                    // mapRanked() in App.jsx legge "division" (formato LCU) oppure
-                    // cerca via mapRankedFromEntries che legge "rank".
-                    // Usiamo queues wrappando e normalizzando rank→division.
+                    println!("[RLP] Dati da Neon cache per puuid={}", puuid);
                     let profile = neon_data["profile"].clone();
                     let matches = neon_data["matches"].clone();
-                    // Normalizza: aggiungi campo "division" = "rank" per compatibilità mapRanked
                     let queues: Vec<Value> = neon_data["ranked_entries"]
                         .as_array().cloned().unwrap_or_default()
                         .into_iter().map(|mut e| {
@@ -230,14 +329,14 @@ async fn offline_fallback(cached_data: &Option<Value>) -> Result<Value, String> 
                         "_cache_age_minutes": neon_data["_cache_age_minutes"]
                     }));
                 }
-                println!("[Offline] Neon non disponibile o nessun record per {}, uso cache locale.", puuid);
             }
         }
     }
+
     // Fallback finale: cache locale
     match cached_data {
         Some(cache) => {
-            println!("[Offline] Uso cache locale (file).");
+            println!("[RLP] Uso cache locale (file) come ultimo fallback.");
             Ok(cache.clone())
         }
         None => Err("CLIENT_CLOSED".into()),
@@ -272,12 +371,16 @@ fn get_cache_path(handle: &AppHandle) -> PathBuf {
         .join("cache.json")
 }
 
-/// Percent-encodes un path segment RFC-3986 (spazi → %20, ecc.)
+/// Percent-encodes un path segment RFC-3986.
+/// Itera sui BYTE UTF-8 (non codepoint Unicode) per encoding corretto
+/// anche con caratteri non-ASCII (coreano, cinese, emoji...).
+/// Es: '망' (U+B9DD) → bytes [0xEB, 0xA7, 0x9D] → "%EB%A7%9D"
 fn encode_path(s: &str) -> String {
-    s.chars().map(|c| match c {
-        'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
-        ' ' => "%20".to_string(),
-        c   => format!("%{:02X}", c as u32),
+    s.bytes().map(|b| match b {
+        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9'
+        | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+        b' ' => "%20".to_string(),
+        b    => format!("%{:02X}", b),
     }).collect::<Vec<_>>().join("")
 }
 
@@ -458,9 +561,21 @@ async fn get_profiles(handle: AppHandle) -> Result<Value, String> {
         let cached_puuid      = cache["puuid"].as_str().unwrap_or("");
         let matches_are_objects = cache["matches"].as_array()
             .and_then(|arr| arr.first()).map(|f| f.is_object()).unwrap_or(false);
-        if cached_puuid == puuid && !puuid.is_empty() && matches_are_objects {
-            println!("Cache locale valida.");
+
+        // Controlla l'età della cache locale (max 30 minuti)
+        let cache_is_fresh = cache["last_update"].as_str()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| {
+                let age = chrono::Utc::now() - dt.with_timezone(&chrono::Utc);
+                age.num_minutes() < 30
+            })
+            .unwrap_or(false);
+
+        if cached_puuid == puuid && !puuid.is_empty() && matches_are_objects && cache_is_fresh {
+            println!("[RLP] Cache locale valida (< 30 min).");
             return Ok(cache.clone());
+        } else if cached_puuid == puuid && !cache_is_fresh {
+            println!("[RLP] Cache locale scaduta, rifresco da LCU.");
         }
     }
 
