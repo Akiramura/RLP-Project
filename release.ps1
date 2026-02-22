@@ -131,7 +131,6 @@ $signature = Get-Content $msiSig.FullName -Raw
 
 Ok "File trovati:"
 Write-Host "   MSI:     $($msiFile.Name)"
-Write-Host "   ZIP:     $($msiZip.Name)"
 Write-Host "   SIG:     $($msiSig.Name)"
 
 # ── 4. Crea latest.json per l'auto-updater ────────────────────
