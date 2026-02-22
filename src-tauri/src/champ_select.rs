@@ -532,14 +532,22 @@ fn parse_opgg_response(text: &str) -> Result<Value, String> {
 
     // Gruppi: [0]=varianti core (mostriamo come "Core Variants"),
     //         [1]=4th, [2]=5th, [3]=6th
+    // slot_labels: etichette per i gruppi OP.GG
+    // Group[0] = varianti core (3rd item), Group[1] = 4th, Group[2] = 5th, Group[3] = 6th
     let slot_labels = [("3rd Item Options", 0usize), ("4th Item", 1), ("5th Item", 2), ("6th Item", 3)];
     let mut slots: Vec<Value> = Vec::new();
+    // Teniamo traccia di tutti gli ID già usati nei blocchi precedenti per evitare duplicati
+    let mut seen_ids: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    // Aggiungi gli ID di starter e core come "già visti"
+    for &id in starter.iter().chain(core.iter()).chain(boots.iter()) { seen_ids.insert(id); }
+
     for (label, idx) in &slot_labels {
-        if let Some(ids) = groups.get(*idx) {
+        if let Some(raw_ids) = groups.get(*idx) {
+            // Filtra gli ID già presenti nei blocchi precedenti
+            let ids: Vec<u64> = raw_ids.iter().copied().filter(|id| !seen_ids.contains(id)).collect();
             if !ids.is_empty() {
-                // Salta "3rd Item Options" se è identico al core principale (dati ridondanti)
-                if *label == "3rd Item Options" && *ids == core { continue; }
-                slots.push(json!({"label": label, "items": to_items(ids)}));
+                for &id in &ids { seen_ids.insert(id); }
+                slots.push(json!({"label": label, "items": to_items(&ids)}));
             }
         }
     }
