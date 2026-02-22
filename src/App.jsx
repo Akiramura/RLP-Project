@@ -97,9 +97,9 @@ export default function App() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [profileData?.puuid, searchData?.puuid]);
 
-    // Gestisce sia il formato Riot API (matchDetail + puuid) che il formato OP.GG (oggetto già normalizzato)
+    // Gestisce sia il formato Riot API (matchDetail + puuid) che il formato RLP (oggetto già normalizzato)
     function extractPlayerData(matchDetail, puuid) {
-        // Formato OP.GG: già normalizzato da get_opgg_matches, ha championName direttamente
+        // Formato RLP: già normalizzato da get_rlp_matches, ha championName direttamente
         if (matchDetail?.championName !== undefined && matchDetail?.kills !== undefined) {
             return matchDetail;
         }
@@ -221,10 +221,10 @@ export default function App() {
                 seasonFetchRunning.current = false;
                 setSeasonFetchDone(false);
 
-                // Prova prima OP.GG (piu veloce, niente rate limit Riot)
+                // Prova prima RLP (piu veloce, niente rate limit Riot)
                 try {
                     const summonerId = `${res.profile?.gameName}#${res.profile?.tagLine}`;
-                    const opggMatches = await invoke("get_opgg_matches", {
+                    const opggMatches = await invoke("get_rlp_matches", {
                         summonerId, region: "euw", limit: 20
                     });
                     if (opggMatches && opggMatches.length > 0) {
@@ -232,11 +232,11 @@ export default function App() {
                         setMatchOffset(opggMatches.length);
                         setSeasonFetchDone(true);
                         latestMatchId.current = opggMatches[0]?.matchId ?? opggMatches[0]?.metadata?.matchId ?? null;
-                        console.log(`[OP.GG] ${opggMatches.length} partite caricate`);
+                        console.log(`[RLP] ${opggMatches.length} partite caricate`);
                         return; // Evita il fetch Riot API
                     }
                 } catch (opggErr) {
-                    console.warn("[OP.GG] Fallback a Riot API:", opggErr);
+                    console.warn("[RLP] Fallback a Riot API:", opggErr);
                 }
 
                 // Fallback: Riot API — conserva i match raw (con info.participants)
@@ -253,7 +253,7 @@ export default function App() {
                 // Polling periodico: controlla se ci sono nuove partite
                 try {
                     const summonerId = `${res.profile?.gameName}#${res.profile?.tagLine}`;
-                    const freshMatches = await invoke("get_opgg_matches", {
+                    const freshMatches = await invoke("get_rlp_matches", {
                         summonerId, region: "euw", limit: 5
                     });
                     if (freshMatches && freshMatches.length > 0) {
@@ -272,7 +272,7 @@ export default function App() {
                         }
                     }
                 } catch (opggErr) {
-                    // OP.GG non disponibile: fallback su Riot API
+                    // RLP non disponibile: fallback su Riot API
                     try {
                         const more = await invoke("get_more_matches", {
                             puuid: res.puuid,
@@ -371,27 +371,27 @@ export default function App() {
             const res = await invoke("search_summoner", { gameName: gameName.trim(), tagLine: tagLine.trim() });
             setSearchData(res);
 
-            // Prova OP.GG per i match della ricerca
+            // Prova RLP per i match della ricerca
             try {
                 const summonerId = `${gameName}#${tagLine}`;
-                const opggMatches = await invoke("get_opgg_matches", {
+                const opggMatches = await invoke("get_rlp_matches", {
                     summonerId, region: "euw", limit: 20
                 });
                 if (opggMatches && opggMatches.length > 0) {
                     setSearchExtraMatches(opggMatches);
                     setSearchMatchOffset(opggMatches.length);
                     setSearchSeasonFetchDone(true);
-                    console.log(`[OP.GG search] ${opggMatches.length} partite`);
+                    console.log(`[RLP search] ${opggMatches.length} partite`);
                     return;
                 }
             } catch (opggErr) {
-                console.warn("[OP.GG search] Fallback a Riot API:", opggErr);
+                console.warn("[RLP search] Fallback a Riot API:", opggErr);
             }
 
             // Fallback: season fetch Riot API
             fetchSeasonMatchesForSearch(res.puuid);
         } catch (err) {
-            setSearchError(String(err));
+            console.error("[RLP search] Error:", err);
             setSearchData(null);
         } finally {
             setSearching(false);
@@ -402,7 +402,7 @@ export default function App() {
         if (e.key !== "Enter" && e.type !== "click") return;
         const parts = searchQuery.trim().split("#");
         if (parts.length !== 2 || !parts[0] || !parts[1]) {
-            setSearchError("Formato corretto: NomeSummoner#TAG (es. lolllita#kitty)");
+            console.warn("[RLP] Formato non valido: NomeSummoner#TAG");
             return;
         }
         setActiveTab("profile");
@@ -504,7 +504,7 @@ export default function App() {
                                 onError={e => { e.target.src = "/RLP_Icon.png"; }}
                             />
                             <div>
-                                <h1 className="text-xl font-bold text-white">League Stats</h1>
+                                <h1 className="text-xl font-bold text-white">RLP</h1>
                                 <p className="text-xs text-slate-400">Statistics & Analytics</p>
                             </div>
                         </div>
@@ -554,37 +554,11 @@ export default function App() {
                 </div>
             )}
 
-            {/* Errore search */}
-            {searchError && (
-                <div className="max-w-7xl mx-auto px-4 mt-4">
-                    <div className="p-3 bg-red-900/50 border border-red-700 text-red-200 rounded-lg text-sm">
-                        {searchError}
-                    </div>
-                </div>
-            )}
+            {/* searchError logged to console only */}
 
             {/* Errori profilo */}
-            {!searchData && profileData?._offline && (
-                <div className="max-w-7xl mx-auto px-4 mt-4">
-                    <div className="p-3 bg-slate-700/80 border border-slate-600 text-slate-300 rounded-lg text-sm flex items-center gap-2">
-                        <span className="w-2 h-2 rounded-full bg-yellow-400 shrink-0" />
-                        <span>
-                            <strong>Modalità offline</strong> — League of Legends non rilevato.
-                            Dati dalla cache Neon
-                            {profileData._cache_age_minutes != null && (
-                                <span className="text-slate-400"> · aggiornati {profileData._cache_age_minutes} min fa</span>
-                            )}
-                        </span>
-                    </div>
-                </div>
-            )}
-            {!searchData && error === "CLIENT_CLOSED" && !profileData && (
-                <div className="max-w-7xl mx-auto px-4 mt-4">
-                    <div className="p-4 bg-yellow-600 text-white rounded-lg shadow-lg">
-                        <strong>Client non rilevato:</strong> Apri League of Legends per vedere i dati aggiornati.
-                    </div>
-                </div>
-            )}
+            {/* Offline mode: dev only — hidden from UI */}
+            {/* CLIENT_CLOSED error logged to console only */}
 
             {/* Main */}
             <main className="max-w-7xl mx-auto px-4 py-8">
@@ -757,7 +731,7 @@ export default function App() {
                 <div className="max-w-7xl mx-auto px-4 py-6">
                     <div className="flex flex-col md:flex-row items-center justify-between gap-4">
                         <p className="text-slate-400 text-sm">
-                            League Stats isn't endorsed by Riot Games and doesn't reflect the views or opinions of Riot Games.
+                            RLP isn't endorsed by Riot Games and doesn't reflect the views or opinions of Riot Games.
                         </p>
                         <p className="text-slate-500 text-xs">Patch 14.4 • Updated 2 hours ago</p>
                     </div>
