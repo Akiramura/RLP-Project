@@ -5,12 +5,13 @@ import { ProfileTab } from "./components/profile-tab";
 import { MatchHistoryTab } from "./components/match-history-tab";
 import { ChampionMetaTab } from "./components/champion-meta-tab";
 import { MetaTab } from "./components/meta-tab";
-import { User, History, TrendingUp, Search, BarChart2, Swords } from "lucide-react";
+import { User, History, TrendingUp, Search, BarChart2, Swords, Tv } from "lucide-react";
 import { Input } from "./components/ui/input";
 import { Button } from "./components/ui/button";
 import "./App.css";
 
 import { ChampSelectTab } from "./components/champ-select-tab";
+import { LiveGameTab } from "./components/live-game-tab";
 
 export default function App() {
     const [profileData, setProfileData] = useState(null);
@@ -41,8 +42,18 @@ export default function App() {
     const [activeTab, setActiveTab] = useState("profile");
     const [isInChampSelect, setIsInChampSelect] = useState(false);
     const [liveMetaData, setLiveMetaData] = useState({});
+    const [liveGamePuuid, setLiveGamePuuid] = useState(null); // puuid override per LiveGameTab
+    const [isInLiveGame, setIsInLiveGame] = useState(false); // profilo attivo in partita live?
     const champSelectPollRef = useRef(null);
+    const liveGamePollRef = useRef(null);
     const wasInChampSelect = useRef(false);
+
+    // Redirect away from champ-select tab if it shouldn't be visible
+    useEffect(() => {
+        if (activeTab === "champ-select" && (searchData || !profileData)) {
+            setActiveTab("profile");
+        }
+    }, [searchData, profileData, activeTab]);
 
     // Poll champ select to auto-switch tab when a game lobby starts
     useEffect(() => {
@@ -66,6 +77,25 @@ export default function App() {
         checkChampSelect();
         return () => clearInterval(champSelectPollRef.current);
     }, []);
+
+    // Poll live game status per mostrare indicatore visivo su tab e pulsante
+    useEffect(() => {
+        async function checkLiveGame() {
+            const activePuuid = searchData?.puuid ?? profileData?.puuid ?? null;
+            if (!activePuuid) { setIsInLiveGame(false); return; }
+            try {
+                const res = await invoke("check_live_game", { puuid: activePuuid });
+                setIsInLiveGame(res?.in_game === true);
+            } catch {
+                setIsInLiveGame(false);
+            }
+        }
+        clearInterval(liveGamePollRef.current);
+        checkLiveGame();
+        liveGamePollRef.current = setInterval(checkLiveGame, 30000);
+        return () => clearInterval(liveGamePollRef.current);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [profileData?.puuid, searchData?.puuid]);
 
     // Gestisce sia il formato Riot API (matchDetail + puuid) che il formato OP.GG (oggetto già normalizzato)
     function extractPlayerData(matchDetail, puuid) {
@@ -387,6 +417,20 @@ export default function App() {
         await doSearch(parts[0], parts[1]);
     }
 
+    function handleViewLiveGame(puuid) {
+        setLiveGamePuuid(puuid || null);
+        setActiveTab("live-game");
+    }
+
+    function handleTabChange(tab) {
+        if (tab === "live-game") {
+            // Usa il puuid del profilo attualmente visualizzato (search o proprio)
+            const activePuuid = searchData?.puuid ?? myPuuid ?? null;
+            setLiveGamePuuid(activePuuid);
+        }
+        setActiveTab(tab);
+    }
+
     function clearSearch() {
         setSearchData(null);
         setSearchQuery("");
@@ -520,24 +564,31 @@ export default function App() {
             )}
 
             {/* Errori profilo */}
-            {!searchData && error === "CLIENT_CLOSED" && (
+            {!searchData && profileData?._offline && (
+                <div className="max-w-7xl mx-auto px-4 mt-4">
+                    <div className="p-3 bg-slate-700/80 border border-slate-600 text-slate-300 rounded-lg text-sm flex items-center gap-2">
+                        <span className="w-2 h-2 rounded-full bg-yellow-400 shrink-0" />
+                        <span>
+                            <strong>Modalità offline</strong> — League of Legends non rilevato.
+                            Dati dalla cache Neon
+                            {profileData._cache_age_minutes != null && (
+                                <span className="text-slate-400"> · aggiornati {profileData._cache_age_minutes} min fa</span>
+                            )}
+                        </span>
+                    </div>
+                </div>
+            )}
+            {!searchData && error === "CLIENT_CLOSED" && !profileData && (
                 <div className="max-w-7xl mx-auto px-4 mt-4">
                     <div className="p-4 bg-yellow-600 text-white rounded-lg shadow-lg">
                         <strong>Client non rilevato:</strong> Apri League of Legends per vedere i dati aggiornati.
                     </div>
                 </div>
             )}
-            {!searchData && error && error !== "CLIENT_CLOSED" && (
-                <div className="max-w-7xl mx-auto px-4 mt-4">
-                    <div className="p-4 bg-red-800 text-white rounded-lg">
-                        Errore: {String(error)}
-                    </div>
-                </div>
-            )}
 
             {/* Main */}
             <main className="max-w-7xl mx-auto px-4 py-8">
-                <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-6">
+                <Tabs value={activeTab} onValueChange={handleTabChange} className="space-y-6">
                     <TabsList className="bg-slate-900 border border-slate-800 p-1">
                         <TabsTrigger
                             value="profile"
@@ -567,14 +618,26 @@ export default function App() {
                             <BarChart2 className="w-4 h-4 mr-2" />
                             Tier List
                         </TabsTrigger>
+                        {!searchData && profileData && (
+                            <TabsTrigger
+                                value="champ-select"
+                                className="data-[state=active]:bg-blue-600 data-[state=active]:text-white relative"
+                            >
+                                <Swords className="w-4 h-4 mr-2" />
+                                Auto Import
+                                {isInChampSelect && (
+                                    <span className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-green-400 rounded-full animate-pulse" />
+                                )}
+                            </TabsTrigger>
+                        )}
                         <TabsTrigger
-                            value="champ-select"
+                            value="live-game"
                             className="data-[state=active]:bg-blue-600 data-[state=active]:text-white relative"
                         >
-                            <Swords className="w-4 h-4 mr-2" />
-                            Auto Import
-                            {isInChampSelect && (
-                                <span className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-green-400 rounded-full animate-pulse" />
+                            <Tv className="w-4 h-4 mr-2" />
+                            Live Game
+                            {isInLiveGame && (
+                                <span className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-red-500 rounded-full animate-pulse" title="In partita!" />
                             )}
                         </TabsTrigger>
                     </TabsList>
@@ -588,6 +651,8 @@ export default function App() {
                                 matches={searchMatches}
                                 myPuuid={searchData.puuid}
                                 mySummonerName={`${searchData.profile?.gameName}#${searchData.profile?.tagLine}`}
+                                onViewLiveGame={handleViewLiveGame}
+                                isInLiveGame={isInLiveGame}
                             />
                         ) : profileData ? (
                             <ProfileTab
@@ -597,6 +662,8 @@ export default function App() {
                                 matches={allMatches}
                                 myPuuid={myPuuid}
                                 mySummonerName={mySummonerName}
+                                onViewLiveGame={handleViewLiveGame}
+                                isInLiveGame={isInLiveGame}
                             />
                         ) : (
                             <div className="flex flex-col items-center justify-center h-64">
@@ -676,6 +743,10 @@ export default function App() {
 
                     <TabsContent value="champ-select" keepMounted>
                         <ChampSelectTab />
+                    </TabsContent>
+
+                    <TabsContent value="live-game">
+                        <LiveGameTab puuidOverride={liveGamePuuid} />
                     </TabsContent>
 
                 </Tabs>

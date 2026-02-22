@@ -1,11 +1,12 @@
 import { Card } from "./ui/card";
 import { Badge } from "./ui/badge";
 import { Progress } from "./ui/progress";
-import { Trophy, Swords, Eye, Coins } from "lucide-react";
+import { Trophy, Swords, Eye, Tv } from "lucide-react";
+import { Button } from "./ui/button";
 import { PATCH } from "./constants";
 import { resolveMe } from "./match-history-tab";
 
-export function ProfileTab({ profile, rankedSolo, rankedFlex, matches, myPuuid, mySummonerName }) {
+export function ProfileTab({ profile, rankedSolo, rankedFlex, matches, myPuuid, mySummonerName, onViewLiveGame, isInLiveGame }) {
     if (!profile) return null;
 
     const level = profile.summonerLevel || 0;
@@ -119,7 +120,7 @@ export function ProfileTab({ profile, rankedSolo, rankedFlex, matches, myPuuid, 
                         <h1 className="text-3xl font-bold text-white mb-2">
                             {profile.gameName}#{profile.tagLine}
                         </h1>
-                        <div className="flex items-center gap-3 mb-4">
+                        <div className="flex items-center gap-3 mb-4 flex-wrap">
                             {rankedSolo && (
                                 <Badge className={`bg-gradient-to-r ${soloColor} text-white border-0`}>
                                     <Trophy className="w-3 h-3 mr-1" />
@@ -127,6 +128,21 @@ export function ProfileTab({ profile, rankedSolo, rankedFlex, matches, myPuuid, 
                                 </Badge>
                             )}
                             <span className="text-slate-400">Level {level}</span>
+                            {onViewLiveGame && myPuuid && (
+                                <Button
+                                    onClick={() => onViewLiveGame(myPuuid)}
+                                    className={`text-white text-xs px-3 py-1 h-7 flex items-center gap-1.5 relative ${isInLiveGame
+                                            ? "bg-red-600 hover:bg-red-500 shadow-lg shadow-red-900/40"
+                                            : "bg-slate-700 hover:bg-slate-600"
+                                        }`}
+                                >
+                                    <Tv className="w-3 h-3" />
+                                    {isInLiveGame ? "In partita! →" : "Vedi in gioco"}
+                                    {isInLiveGame && (
+                                        <span className="absolute -top-1 -right-1 w-2 h-2 bg-red-400 rounded-full animate-pulse" />
+                                    )}
+                                </Button>
+                            )}
                         </div>
                         <div className="space-y-2">
                             <div className="flex justify-between text-sm">
