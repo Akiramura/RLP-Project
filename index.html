@@ -553,31 +553,32 @@
       <p>RLP Project ("the App") is a free, open-source desktop application built with Tauri and React. We are committed to protecting your privacy. This policy explains what data the App accesses, how it is used, and what we do not collect.</p>
 
       <h3>2. Data We Do NOT Collect</h3>
-      <p>RLP Project does not operate any backend server, database, or analytics pipeline. We do not collect, store, transmit, or sell any personal data. Specifically:</p>
+      <p>We do not collect your Riot account credentials or passwords, payment information, IP addresses, device identifiers, or any sensitive personal data. We do not use cookies, advertising networks, or analytics SDKs of any kind.</p>
+
+      <h3>3. Data Accessed and Cached</h3>
+      <p>To function, the App retrieves publicly available League of Legends data via the Riot Games API and caches it to improve performance and enable offline access. Specifically:</p>
       <ul>
-        <li>We do not collect your Riot account credentials or passwords.</li>
-        <li>We do not store your summoner name, PUUID, or game history on any server.</li>
-        <li>We do not use cookies, trackers, advertising networks, or analytics SDKs.</li>
-        <li>We do not collect crash reports or telemetry data.</li>
+        <li><strong>League Client credentials</strong> — RLP reads the local LCU (League Client Update) API lockfile while the League client is running on your machine. This data is used only to authenticate local API calls and never transmitted to our servers.</li>
+        <li><strong>Riot Games API</strong> — The App retrieves your summoner profile, ranked entries, match history, and champion masteries via the official Riot Games API. These requests are governed by <a href="https://www.riotgames.com/en/privacy-notice" target="_blank">Riot Games' Privacy Notice</a>.</li>
+        <li><strong>Third-party build data</strong> — The App fetches anonymized champion build statistics from public meta sources (OP.GG). No personal data is sent in these requests.</li>
       </ul>
 
-      <h3>3. Data Accessed Locally</h3>
-      <p>To function, the App accesses data available on your local machine:</p>
+      <h3>4. Data Storage — Neon Cloud Cache</h3>
+      <p>To reduce redundant API calls and provide faster load times, the App uses a serverless PostgreSQL database hosted on <a href="https://neon.tech" target="_blank">Neon</a> as a temporary cache. The following data may be stored server-side:</p>
       <ul>
-        <li><strong>League Client credentials</strong> — RLP reads the local LCU (League Client Update) API lockfile, available only while the League client is running on your machine. This data never leaves your device.</li>
-        <li><strong>Riot Games API</strong> — The App makes requests to the official public Riot Games API (<code>api.riotgames.com</code>) using your summoner name or PUUID to retrieve match history, ranked data, and masteries. These requests are governed by <a href="https://www.riotgames.com/en/privacy-notice" target="_blank">Riot Games' Privacy Notice</a>.</li>
-        <li><strong>Third-party build data</strong> — The App fetches anonymized champion build statistics from public meta sources. No personal data is sent in these requests.</li>
+        <li><strong>Summoner cache</strong> — PUUID (Riot's internal player identifier), summoner name (game name + tag), profile data, ranked entries, and match history. This data is automatically refreshed and considered stale after <strong>60 minutes</strong>.</li>
+        <li><strong>Match cache</strong> — Individual match details (participants, items, KDA, game duration) indexed by match ID. This data is cached indefinitely as match results do not change.</li>
       </ul>
-
-      <h3>4. Data Storage</h3>
-      <p>All data retrieved by RLP is stored only in the memory of the running process and is discarded when the App is closed. No local database or persistent files containing personal data are written to disk by the App.</p>
+      <p>This data is sourced entirely from the public Riot Games API and mirrors what is already publicly accessible. It is used solely to serve the App's functionality and is never sold, shared with third parties, or used for advertising or profiling purposes.</p>
+      <p>You may request deletion of your cached data at any time by opening an issue on our <a href="https://github.com/akiramura/RLP-Project" target="_blank">GitHub repository</a> with your summoner name.</p>
 
       <h3>5. Third-Party Services</h3>
       <p>The App makes requests to:</p>
       <ul>
         <li><strong>Riot Games API</strong> — <a href="https://www.riotgames.com/en/privacy-notice" target="_blank">Riot Games Privacy Notice</a></li>
-        <li><strong>Data Dragon CDN</strong> (<code>ddragon.leagueoflegends.com</code>) — for champion images and game assets (no personal data transmitted)</li>
-        <li><strong>OP.GG</strong> — for aggregated champion build statistics (no personal data transmitted)</li>
+        <li><strong>Neon (neon.tech)</strong> — serverless PostgreSQL cache — <a href="https://neon.tech/privacy-policy" target="_blank">Neon Privacy Policy</a></li>
+        <li><strong>Data Dragon CDN</strong> (<code>ddragon.leagueoflegends.com</code>) — champion images and game assets (no personal data transmitted)</li>
+        <li><strong>OP.GG</strong> — aggregated champion build statistics (no personal data transmitted)</li>
       </ul>
 
       <h3>6. Children's Privacy</h3>
