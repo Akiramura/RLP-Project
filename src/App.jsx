@@ -329,9 +329,11 @@ export default function App() {
                         await update.downloadAndInstall();
                         await relaunch();
                     }
+                } else {
+                    console.log("[Updater] Nessun aggiornamento disponibile. Versione attuale:", update);
                 }
             } catch (e) {
-                console.warn("[Updater]", e);
+                console.error("[Updater] Errore:", e);
             }
         }
         checkForUpdates();
