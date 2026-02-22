@@ -1,7 +1,7 @@
 ﻿[package]
 name = "rlp-project"
 version = "1.0.0"
-description = "
+description = ""
 authors = ["Akiramura"]
 edition = "2026"
 
@@ -30,4 +30,5 @@ postgres-native-tls = "0.5"
 native-tls = "0.2"
 deadpool-postgres = { version = "0.14", features = ["rt_tokio_1"] }
 dotenvy = "0.15"
+
 
