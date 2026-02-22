@@ -67,8 +67,7 @@ if ($LASTEXITCODE -ne 0) { Err "Errore durante il pull di $DEV_BRANCH." }
 Log "Aggiorno versione in $TAURI_CONF..."
 $tauriConf = Get-Content $TAURI_CONF -Raw | ConvertFrom-Json
 $tauriConf.version = $Version
-$tauriConf | ConvertTo-Json -Depth 20 | Set-Content $TAURI_CONF -Encoding UTF8
-Ok "tauri.conf.json → $Version"
+$tauriConf | ConvertTo-Json -Depth 20 | Set-Content $TAURI_CONF -Encoding utf8NoBOMOk "tauri.conf.json → $Version"
 
 # Aggiorna versione in Cargo.toml
 Log "Aggiorno versione in $CARGO_TOML..."
