@@ -1,43 +1,44 @@
 ﻿{
-    "$schema":  "https://schema.tauri.app/config/2",
-    "productName":  "rlp-project",
-    "version":  "1.0.0",
-    "identifier":  "com.administrator.rlp-project",
-    "build":  {
-                  "beforeDevCommand":  "npm run dev",
-                  "devUrl":  "http://localhost:1420",
-                  "beforeBuildCommand":  "npm run build",
-                  "frontendDist":  "../dist"
-              },
-    "app":  {
-                "windows":  [
-                                {
-                                    "title":  "RLP - Analytics",
-                                    "width":  1920,
-                                    "height":  1080
-                                }
-                            ],
-                "security":  {
-                                 "csp":  null
-                             }
-            },
-    "bundle":  {
-                   "active":  true,
-                   "targets":  "all",
-                   "icon":  [
-                                "icons/32x32.png",
-                                "icons/128x128.png",
-                                "icons/128x128@2x.png",
-                                "icons/icon.icns",
-                                "icons/icon.ico"
-                            ]
-               },
-    "plugins":  {
-                    "updater":  {
-                                    "pubkey":  "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IENGMUUyMDE2Q0JEOUNGQUMKUldTc3o5bkxGaUFlejBVYkJBRUVzbkdDRUd3Z2VjTGgxTEVFaHpjaEd3UEdaYjIyQkZFMHlyVC8K",
-                                    "endpoints":  [
-                                                      "https://github.com/TUO_USERNAME/rlp-analytics/releases/latest/download/latest.json"
-                                                  ]
-                                }
-                }
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "rlp-project",
+  "version": "1.0.0",
+  "identifier": "com.administrator.rlp-project",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "RLP - Analytics",
+        "width": 1920,
+        "height": 1080
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "createUpdaterArtifacts": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IENGMUUyMDE2Q0JEOUNGQUMKUldTc3o5bkxGaUFlejBVYkJBRUVzbkdDRUd3Z2VjTGgxTEVFaHpjaEd3UEdaYjIyQkZFMHlyVC8K",
+      "endpoints": [
+        "https://github.com/Akiramura/RLP-Project/releases/latest/download/latest.json"
+      ]
+    }
+  }
 }
