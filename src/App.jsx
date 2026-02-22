@@ -1,5 +1,7 @@
 import { useEffect, useState, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { check } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./components/ui/tabs";
 import { ProfileTab } from "./components/profile-tab";
 import { MatchHistoryTab } from "./components/match-history-tab";
@@ -312,6 +314,27 @@ export default function App() {
         fetchData();
         const interval = setInterval(fetchData, 10000);
         return () => clearInterval(interval);
+    }, []);
+
+    // ── Auto-updater ──────────────────────────────────────────────
+    useEffect(() => {
+        async function checkForUpdates() {
+            try {
+                const update = await check();
+                if (update?.available) {
+                    const yes = await window.confirm(
+                        `Disponibile RLP v${update.version}!\n\n${update.body ?? ""}\n\nVuoi aggiornare ora?`
+                    );
+                    if (yes) {
+                        await update.downloadAndInstall();
+                        await relaunch();
+                    }
+                }
+            } catch (e) {
+                console.warn("[Updater]", e);
+            }
+        }
+        checkForUpdates();
     }, []);
 
     async function loadMoreMatches() {
