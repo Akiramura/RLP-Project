@@ -3,7 +3,7 @@ name = "rlp-project"
 version = "1.0.0"
 description = ""
 authors = ["Akiramura"]
-edition = "2026"
+edition = "2021"
 
 [lib]
 name = "rlp_project_lib"
@@ -30,5 +30,6 @@ postgres-native-tls = "0.5"
 native-tls = "0.2"
 deadpool-postgres = { version = "0.14", features = ["rt_tokio_1"] }
 dotenvy = "0.15"
+
 
 
