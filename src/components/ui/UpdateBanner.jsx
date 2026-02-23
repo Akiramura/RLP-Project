@@ -4,20 +4,20 @@ export function UpdateBanner({ status, info, progress, onUpdate, onDismiss }) {
     if (status === "idle") return null;
 
     return (
-        <div className="fixed inset-0 z-[9999] flex items-center justify-center">
+        <div className="fixed inset-0 z-[9999] pointer-events-none">
 
             {/* Backdrop */}
             {status === "available" ? (
                 <div
-                    className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+                    className="absolute inset-0 bg-black/60 backdrop-blur-sm pointer-events-auto"
                     onClick={onDismiss}
                 />
             ) : (
                 <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" />
             )}
 
-            {/* Card */}
-            <div className="relative w-[420px] animate-in fade-in zoom-in-95 duration-300">
+            {/* Card — centrato con transform */}
+            <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[420px] pointer-events-auto animate-in fade-in zoom-in-95 duration-300">
 
                 {/* Outer glow */}
                 <div className="absolute inset-0 rounded-xl bg-[#1e6fff]/10 blur-2xl pointer-events-none" />

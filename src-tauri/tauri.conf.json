@@ -11,11 +11,13 @@
               },
     "app":  {
                 "windows":  [
-                                {
-                                    "title":  "RLP - Analytics",
-                                    "width":  1920,
-                                    "height":  1080
-                                }
+                  {
+                    "title": "RLP - Analytics",
+                    "width": 1920,
+                    "height": 1080,
+                    "fullscreen": false,
+                    "maximized": true
+                  }
                             ],
                 "security":  {
                                  "csp":  null
