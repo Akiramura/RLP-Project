@@ -31,6 +31,8 @@ export default function App() {
     const matchesInitialized = useRef(false);
     const lastLoadedPuuid = useRef(null);
     const latestMatchId = useRef(null);
+    const seenMatchIds = useRef(new Set());        // dedup esterno per profilo principale
+    const seenSearchMatchIds = useRef(new Set());  // dedup esterno per search
 
     const [seasonFetchDone, setSeasonFetchDone] = useState(false);
     const seasonFetchRunning = useRef(false);
@@ -139,32 +141,36 @@ export default function App() {
 
     const SEASON_2026_START = new Date("2026-01-08T00:00:00Z").getTime();
 
-    async function runSeasonFetch({ puuid, startOffset, setMatches, setOffset, setDone, runningRef }) {
+    async function runSeasonFetch({ puuid, startOffset, setMatches, setOffset, setDone, runningRef, seenIds }) {
         if (runningRef.current) return;
         runningRef.current = true;
 
         let offset = startOffset;
         let fetched = 0;
 
-        while (runningRef.current && fetched < 100) {
+        while (runningRef.current && fetched < 200) {
             try {
                 const more = await invoke("get_more_matches", { puuid, start: offset });
 
+                // more.length === 0 significa che Riot API non ha più match → fine
                 if (!more || more.length === 0) break;
 
                 const rawMatches = more.filter(m => m?.metadata || m?.info);
 
-                // get_more_matches lato Rust già filtra per startTime=SEASON_2026_START_SECS
-                // Se torna 0 match validi, siamo oltre la season → stop
-                if (rawMatches.length === 0) break;
-
-                setMatches(prev => {
-                    const ids = new Set(prev.map(m => m?.metadata?.matchId ?? m?.matchId));
-                    return [...prev, ...rawMatches.filter(m => !ids.has(m?.metadata?.matchId ?? m?.matchId))];
+                // Dedup usando il set esterno (immune da race condition React state)
+                const newMatches = rawMatches.filter(m => {
+                    const id = m?.metadata?.matchId ?? m?.matchId;
+                    if (!id || seenIds.current.has(id)) return false;
+                    seenIds.current.add(id);
+                    return true;
                 });
-                fetched += rawMatches.length;
-                // L'offset va avanzato di 10 (quanti ne chiede get_more_matches a Riot),
-                // NON di rawMatches.length — altrimenti i batch si sovrappongono.
+
+                if (newMatches.length > 0) {
+                    setMatches(prev => [...prev, ...newMatches]);
+                    fetched += newMatches.length;
+                }
+
+                // L'offset va avanzato di 10 (quanti ne chiede get_more_matches a Riot)
                 offset += 10;
                 if (setOffset) setOffset(offset);
 
@@ -195,6 +201,7 @@ export default function App() {
             setOffset: setMatchOffset,
             setDone: setSeasonFetchDone,
             runningRef: seasonFetchRunning,
+            seenIds: seenMatchIds,
         });
     }
 
@@ -216,10 +223,11 @@ export default function App() {
                 // Riot API — conserva i match raw (con info.participants)
                 if (res?.matches) {
                     const filtered = res.matches.filter(m => m?.metadata || m?.info);
+                    // Popola il set di dedup con i match già caricati
+                    seenMatchIds.current = new Set(
+                        filtered.map(m => m?.metadata?.matchId ?? m?.matchId).filter(Boolean)
+                    );
                     setAllMatches(filtered);
-                    // initialOffset DEVE essere 20 (quanti ne ha richiesti get_profiles a Riot API),
-                    // NON filtered.length — altrimenti get_more_matches parte da un offset sbagliato
-                    // che si sovrappone con i match già ricevuti (custom/pre-2026 saltati).
                     const initialOffset = 20;
                     setMatchOffset(initialOffset);
                     latestMatchId.current = filtered[0]?.metadata?.matchId ?? null;
@@ -330,11 +338,14 @@ export default function App() {
                 start: matchOffset,
             });
             const raw = more.filter(m => m?.metadata || m?.info);
-            setAllMatches(prev => {
-                const ids = new Set(prev.map(m => m?.metadata?.matchId ?? m?.matchId));
-                return [...prev, ...raw.filter(m => !ids.has(m?.metadata?.matchId ?? m?.matchId))];
+            const newMatches = raw.filter(m => {
+                const id = m?.metadata?.matchId ?? m?.matchId;
+                if (!id || seenMatchIds.current.has(id)) return false;
+                seenMatchIds.current.add(id);
+                return true;
             });
-            setMatchOffset(prev => prev + 10); // sempre +10, non more.length
+            if (newMatches.length > 0) setAllMatches(prev => [...prev, ...newMatches]);
+            setMatchOffset(prev => prev + 10);
         } catch (e) {
             console.error("Errore carica altri:", e);
         } finally {
@@ -346,18 +357,20 @@ export default function App() {
         if (!searchData?.puuid) return;
         setLoadingMoreSearch(true);
         try {
-            // search_summoner fetcha 20 match, quindi il primo batch extra parte da 20
             const offset = searchMatchOffset === 0 ? 20 : searchMatchOffset;
             const more = await invoke("get_more_matches", {
                 puuid: searchData.puuid,
                 start: offset,
             });
             const raw = more.filter(m => m?.metadata || m?.info);
-            setSearchExtraMatches(prev => {
-                const ids = new Set(prev.map(m => m?.metadata?.matchId ?? m?.matchId));
-                return [...prev, ...raw.filter(m => !ids.has(m?.metadata?.matchId ?? m?.matchId))];
+            const newMatches = raw.filter(m => {
+                const id = m?.metadata?.matchId ?? m?.matchId;
+                if (!id || seenSearchMatchIds.current.has(id)) return false;
+                seenSearchMatchIds.current.add(id);
+                return true;
             });
-            setSearchMatchOffset(offset + 10); // sempre +10
+            if (newMatches.length > 0) setSearchExtraMatches(prev => [...prev, ...newMatches]);
+            setSearchMatchOffset(offset + 10);
         } catch (e) {
             console.error("Errore carica altri search:", e);
         } finally {
@@ -367,11 +380,12 @@ export default function App() {
 
     function fetchSeasonMatchesForSearch(puuid) {
         return runSeasonFetch({
-            puuid, startOffset: 20, // search_summoner fetcha 20, quindi partiamo da 20
+            puuid, startOffset: 20, // search_summoner fetcha 20, partiamo da 20
             setMatches: setSearchExtraMatches,
             setOffset: null,
             setDone: setSearchSeasonFetchDone,
             runningRef: searchSeasonFetchRunning,
+            seenIds: seenSearchMatchIds,
         });
     }
 
@@ -385,6 +399,12 @@ export default function App() {
         try {
             const res = await invoke("search_summoner", { gameName: gameName.trim(), tagLine: tagLine.trim() });
             setSearchData(res);
+
+            // Popola seenSearchMatchIds con i match già caricati da search_summoner
+            const initialMatches = res?.matches?.filter(m => m?.metadata || m?.info) || [];
+            seenSearchMatchIds.current = new Set(
+                initialMatches.map(m => m?.metadata?.matchId ?? m?.matchId).filter(Boolean)
+            );
 
             // Usa Riot API season fetch
             fetchSeasonMatchesForSearch(res.puuid);
@@ -478,12 +498,10 @@ export default function App() {
         ? `${profileData.profile.gameName}#${profileData.profile.tagLine}`
         : null;
 
-    const baseSearchMatches = searchData?.matches?.filter(m => m?.metadata || m?.info) || [];
-    const searchMatches = (() => {
-        const ids = new Set(baseSearchMatches.map(m => m?.metadata?.matchId ?? m?.matchId));
-        const extras = searchExtraMatches.filter(m => !ids.has(m?.metadata?.matchId ?? m?.matchId));
-        return [...baseSearchMatches, ...extras];
-    })();
+    const searchMatches = [
+        ...(searchData?.matches?.filter(m => m?.metadata || m?.info) || []),
+        ...searchExtraMatches,
+    ];
     const searchRankedSolo = searchData ? mapRankedFromEntries(searchData.ranked_entries, "RANKED_SOLO_5x5") : null;
     const searchRankedFlex = searchData ? mapRankedFromEntries(searchData.ranked_entries, "RANKED_FLEX_SR") : null;
 
