@@ -1,7 +1,9 @@
 import { Card } from "./ui/card";
-import { Clock, TrendingUp, ChevronDown, ChevronUp } from "lucide-react";
+import { Clock, TrendingUp, ChevronDown, ChevronUp, ShoppingCart } from "lucide-react";
 import { useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { PATCH } from "./constants";
+import { resolveMe } from "./utils";
 
 const POSITION_ICON = {
     top: "🛡️", jungle: "🌲", mid: "✨",
@@ -125,13 +127,13 @@ function TeamsPanel({ participants, myTeamId, myPuuid, mySummonerName, onPlayerC
         const handleClick = () => {
             if (!clickable) return;
             const name = p.riotIdGameName ?? p.summonerName;
-            // Usa riotIdTagline se disponibile, altrimenti cerca il # già nel nome, altrimenti EUW
             const tag = p.riotIdTagline || null;
             const summonerId = tag
                 ? `${name}#${tag}`
                 : name.includes("#") ? name : `${name}#EUW`;
             onPlayerClick(summonerId);
         };
+        const playerItems = [p.item0, p.item1, p.item2, p.item3, p.item4, p.item5, p.item6];
         return (
             <div
                 onClick={clickable ? handleClick : undefined}
@@ -146,11 +148,20 @@ function TeamsPanel({ participants, myTeamId, myPuuid, mySummonerName, onPlayerC
                     className="w-7 h-7 rounded object-cover bg-[#0d1f38] shrink-0"
                     onError={e => { e.target.style.display = "none"; }}
                 />
-                <span className={`text-xs truncate w-28 ${isMe ? "text-[#a8e4ff] font-semibold" : clickable ? "text-[#b8d4e8] group-hover:text-white" : "text-[#8ab0cc]"}`}>
+                <span className={`text-xs truncate w-24 ${isMe ? "text-[#a8e4ff] font-semibold" : clickable ? "text-[#b8d4e8]" : "text-[#8ab0cc]"}`}>
                     {displayName}
                     {clickable && <span className="ml-1 text-[#3a6080] text-xs">↗</span>}
                 </span>
-                <span className="text-xs text-[#3a6080] tabular-nums ml-auto shrink-0">
+                {/* Items */}
+                <div className="flex gap-0.5 flex-1 justify-center">
+                    {playerItems.map((id, i) => {
+                        const url = itemIconUrl(id);
+                        return url
+                            ? <img key={i} src={url} alt="" className="w-5 h-5 rounded object-cover bg-[#0d1f38]" onError={e => { e.target.style.display = "none"; }} />
+                            : <div key={i} className="w-5 h-5 rounded bg-[#0d1f38]/40" />;
+                    })}
+                </div>
+                <span className="text-xs text-[#3a6080] tabular-nums shrink-0">
                     {p.kills}/{p.deaths}/{p.assists}
                 </span>
                 <span className="text-xs w-10 text-right shrink-0 tabular-nums text-[#5a8ab0]">
@@ -179,6 +190,86 @@ function TeamsPanel({ participants, myTeamId, myPuuid, mySummonerName, onPlayerC
                 <div className="space-y-0.5">
                     {enemies.map((p, i) => <PlayerRow key={i} p={p} />)}
                 </div>
+            </div>
+        </div>
+    );
+}
+
+function TimelinePanel({ matchId, myPuuid }) {
+    const [timeline, setTimeline] = useState(null);
+    const [loading, setLoading] = useState(false);
+    const [loaded, setLoaded] = useState(false);
+
+    async function load() {
+        if (loaded) return;
+        setLoading(true);
+        try {
+            const data = await invoke("get_match_timeline", { matchId });
+            setTimeline(data);
+        } catch (e) {
+            console.error("[Timeline]", e);
+            setTimeline(null);
+        } finally {
+            setLoading(false);
+            setLoaded(true);
+        }
+    }
+
+    // Carica automaticamente al mount
+    useState(() => { load(); }, []);
+
+    if (loading) return (
+        <div className="text-xs text-[#3a6080] animate-pulse py-2">Loading timeline...</div>
+    );
+    if (!timeline) return null;
+
+    // Estrai eventi ITEM_PURCHASED per il mio PUUID dal frame
+    const frames = timeline?.info?.frames ?? [];
+    const myPurchases = [];
+    for (const frame of frames) {
+        const timeMin = Math.floor((frame.timestamp ?? 0) / 60000);
+        for (const ev of frame.events ?? []) {
+            if (ev.type === "ITEM_PURCHASED" && ev.participantId != null) {
+                // Trova il participantId corrispondente al mio puuid
+                const participants = timeline?.info?.participants ?? [];
+                const me = participants.find(p => p.puuid === myPuuid);
+                if (me && ev.participantId === me.participantId) {
+                    myPurchases.push({ itemId: ev.itemId, timeMin });
+                }
+            }
+        }
+    }
+
+    // Raggruppa per minuto e deduplica sequenziali
+    const grouped = myPurchases.reduce((acc, { itemId, timeMin }) => {
+        if (!acc[timeMin]) acc[timeMin] = [];
+        acc[timeMin].push(itemId);
+        return acc;
+    }, {});
+
+    const minutes = Object.keys(grouped).map(Number).sort((a, b) => a - b);
+
+    if (minutes.length === 0) return null;
+
+    return (
+        <div className="mt-3">
+            <p className="text-[10px] font-mono tracking-[0.15em] text-[#4fc3f7]/60 uppercase mb-2 flex items-center gap-1">
+                <ShoppingCart className="w-3 h-3" /> My Item Timeline
+            </p>
+            <div className="flex flex-wrap gap-3">
+                {minutes.map(min => (
+                    <div key={min} className="flex items-center gap-1.5">
+                        <span className="text-[10px] font-mono text-[#3a6080] w-8 shrink-0">{min}m</span>
+                        <div className="flex gap-0.5">
+                            {grouped[min].map((id, i) => {
+                                const url = itemIconUrl(id);
+                                return url
+                                    ? <img key={i} src={url} alt="" title={`Item ${id}`} className="w-6 h-6 rounded object-cover bg-[#0d1f38]" onError={e => { e.target.style.display = "none"; }} />
+                                    : null;
+                            })}
+                        </div>
+                    </div>
+                ))}
             </div>
         </div>
     );
@@ -338,37 +429,27 @@ function MatchCard({ match, myPuuid, mySummonerName, onPlayerClick }) {
                         mySummonerName={mySummonerName}
                         onPlayerClick={onPlayerClick}
                     />
+                    {/* Timeline acquisti */}
+                    {myPuuid && (match.metadata?.matchId ?? match.matchId) && (
+                        <TimelinePanel
+                            matchId={match.metadata?.matchId ?? match.matchId}
+                            myPuuid={myPuuid}
+                        />
+                    )}
                 </div>
             )}
         </Card>
     );
 }
 
-// Estrae i dati del giocatore corrente da un match (struttura Riot API o flat)
-export function resolveMe(match, myPuuid, mySummonerName) {
-    const participants = match.info?.participants ?? match.participants ?? [];
-    // mySummonerName e' spesso "GameName#TAG" ma riotIdGameName non include il tag
-    const myGameName = mySummonerName?.split("#")[0]?.toLowerCase() ?? "";
-    const myFullLower = mySummonerName?.toLowerCase() ?? "";
-    const me = participants.find(p =>
-        p.isMe === true ||
-        (myPuuid && p.puuid === myPuuid) ||
-        (mySummonerName && (
-            p.summonerName?.toLowerCase() === myFullLower ||
-            p.riotIdGameName?.toLowerCase() === myFullLower ||
-            (myGameName && p.riotIdGameName?.toLowerCase() === myGameName) ||
-            (myGameName && p.summonerName?.toLowerCase() === myGameName)
-        ))
-    ) ?? participants[0];
-    if (!me) return match;
-    return {
-        ...me,
-        gameDuration: match.info?.gameDuration ?? match.gameDuration,
-        gameCreation: match.info?.gameCreation ?? match.gameCreation,
-    };
-}
+// resolveMe è ora in ./utils.js — re-export per compatibilità con profile-tab e altri
+export { resolveMe } from "./utils";
+
+const MATCHES_PER_PAGE = 10;
 
 export function MatchHistoryTab({ matches, myPuuid, mySummonerName, onPlayerClick }) {
+    const [visibleCount, setVisibleCount] = useState(MATCHES_PER_PAGE);
+
     if (!matches || matches.length === 0) {
         return (
             <div className="flex items-center justify-center h-64">
@@ -387,6 +468,9 @@ export function MatchHistoryTab({ matches, myPuuid, mySummonerName, onPlayerClic
         ? (validKda.reduce((s, m) => s + (m.kills + m.assists) / m.deaths, 0) / validKda.length).toFixed(2)
         : "Perfect";
 
+    const visibleMatches = matches.slice(0, visibleCount);
+    const hasMore = visibleCount < matches.length;
+
     return (
         <div className="space-y-3">
             <div className="flex items-center gap-5 p-3 bg-[#070f1e] rounded-xl border border-[#0f2040] text-sm flex-wrap">
@@ -402,7 +486,7 @@ export function MatchHistoryTab({ matches, myPuuid, mySummonerName, onPlayerClic
                 <span className="text-[#5a8ab0]">KDA medio: <span className="text-white">{avgKda}</span></span>
             </div>
 
-            {matches.map((match, i) => (
+            {visibleMatches.map((match, i) => (
                 <MatchCard
                     key={match.metadata?.matchId ?? match.matchId ?? i}
                     match={match}
@@ -411,6 +495,15 @@ export function MatchHistoryTab({ matches, myPuuid, mySummonerName, onPlayerClic
                     onPlayerClick={onPlayerClick}
                 />
             ))}
+
+            {hasMore && (
+                <button
+                    onClick={() => setVisibleCount(c => c + MATCHES_PER_PAGE)}
+                    className="w-full py-2.5 rounded-xl border border-[#1a3558] bg-[#070f1e] text-[#5a8ab0] text-sm font-medium hover:bg-[#0d1f38] hover:text-[#7dd8ff] hover:border-[#244570] transition-all"
+                >
+                    Carica altre {Math.min(MATCHES_PER_PAGE, matches.length - visibleCount)} partite
+                </button>
+            )}
         </div>
     );
 }

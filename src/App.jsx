@@ -138,8 +138,6 @@ export default function App() {
     }
 
     const SEASON_2026_START = new Date("2026-01-08T00:00:00Z").getTime();
-    const BATCH_DELAY_MS = 2500;
-    const SEASON_FETCH_LIMIT = 20; // max partite da scaricare automaticamente all'avvio
 
     async function runSeasonFetch({ puuid, startOffset, setMatches, setOffset, setDone, runningRef }) {
         if (runningRef.current) return;
@@ -147,47 +145,33 @@ export default function App() {
 
         let offset = startOffset;
         let fetched = 0;
-        let keepGoing = true;
 
-        while (keepGoing && runningRef.current && fetched < SEASON_FETCH_LIMIT) {
+        while (runningRef.current && fetched < 100) {
             try {
                 const more = await invoke("get_more_matches", { puuid, start: offset });
 
                 if (!more || more.length === 0) break;
 
                 const rawMatches = more.filter(m => m?.metadata || m?.info);
-                const extracted = rawMatches
-                    .map(m => extractPlayerData(m, puuid))
-                    .filter(Boolean);
 
-                const oldestInBatch = extracted.reduce((min, m) =>
-                    m.gameCreation && m.gameCreation < min ? m.gameCreation : min, Infinity
-                );
+                // get_more_matches lato Rust già filtra per startTime=SEASON_2026_START_SECS
+                // Se torna 0 match validi, siamo oltre la season → stop
+                if (rawMatches.length === 0) break;
 
-                if (oldestInBatch < SEASON_2026_START) {
-                    const seasonOnly = rawMatches.filter(m => {
-                        const gc = m?.info?.gameCreation ?? m?.gameCreation;
-                        return !gc || gc >= SEASON_2026_START;
-                    });
-                    if (seasonOnly.length > 0) {
-                        setMatches(prev => {
-                            const ids = new Set(prev.map(m => m?.metadata?.matchId ?? m?.matchId));
-                            return [...prev, ...seasonOnly.filter(m => !ids.has(m?.metadata?.matchId ?? m?.matchId))];
-                        });
-                        fetched += seasonOnly.length;
-                    }
-                    keepGoing = false;
-                } else {
-                    setMatches(prev => {
-                        const ids = new Set(prev.map(m => m?.metadata?.matchId ?? m?.matchId));
-                        return [...prev, ...rawMatches.filter(m => !ids.has(m?.metadata?.matchId ?? m?.matchId))];
-                    });
-                    fetched += rawMatches.length;
-                    offset += more.length;
-                    if (setOffset) setOffset(offset);
-                }
+                setMatches(prev => {
+                    const ids = new Set(prev.map(m => m?.metadata?.matchId ?? m?.matchId));
+                    return [...prev, ...rawMatches.filter(m => !ids.has(m?.metadata?.matchId ?? m?.matchId))];
+                });
+                fetched += rawMatches.length;
+                // L'offset va avanzato di 10 (quanti ne chiede get_more_matches a Riot),
+                // NON di rawMatches.length — altrimenti i batch si sovrappongono.
+                offset += 10;
+                if (setOffset) setOffset(offset);
 
-                await new Promise(r => setTimeout(r, BATCH_DELAY_MS));
+                // Se Riot ha restituito meno di 10 match, siamo alla fine della season
+                if (more.length < 10) break;
+
+                await new Promise(r => setTimeout(r, 3000));
             } catch (e) {
                 const msg = String(e).toLowerCase();
                 if (msg.includes("429") || msg.includes("rate limit")) {
@@ -229,82 +213,49 @@ export default function App() {
                 seasonFetchRunning.current = false;
                 setSeasonFetchDone(false);
 
-                // Prova prima RLP (piu veloce, niente rate limit Riot)
-                try {
-                    const summonerId = `${res.profile?.gameName}#${res.profile?.tagLine}`;
-                    const opggMatches = await invoke("get_rlp_matches", {
-                        summonerId, region: "euw", limit: 20
-                    });
-                    if (opggMatches && opggMatches.length > 0) {
-                        setAllMatches(opggMatches);
-                        setMatchOffset(opggMatches.length);
-                        setSeasonFetchDone(true);
-                        latestMatchId.current = opggMatches[0]?.matchId ?? opggMatches[0]?.metadata?.matchId ?? null;
-                        console.log(`[RLP] ${opggMatches.length} partite caricate`);
-                        return; // Evita il fetch Riot API
-                    }
-                } catch (opggErr) {
-                    console.warn("[RLP] Fallback a Riot API:", opggErr);
-                }
-
-                // Fallback: Riot API — conserva i match raw (con info.participants)
+                // Riot API — conserva i match raw (con info.participants)
                 if (res?.matches) {
                     const filtered = res.matches.filter(m => m?.metadata || m?.info);
                     setAllMatches(filtered);
-                    const initialOffset = filtered.length;
+                    // initialOffset DEVE essere 20 (quanti ne ha richiesti get_profiles a Riot API),
+                    // NON filtered.length — altrimenti get_more_matches parte da un offset sbagliato
+                    // che si sovrappone con i match già ricevuti (custom/pre-2026 saltati).
+                    const initialOffset = 20;
                     setMatchOffset(initialOffset);
                     latestMatchId.current = filtered[0]?.metadata?.matchId ?? null;
                     fetchSeasonMatches(res.puuid, initialOffset);
                 }
 
             } else {
-                // Polling periodico: controlla se ci sono nuove partite
+                // Polling periodico: controlla se ci sono nuove partite via Riot API
+                // Salta se il season fetch è ancora in corso (evita rate limit)
+                if (seasonFetchRunning.current) {
+                    console.log("[Refresh] Season fetch in corso, salto check nuove partite.");
+                    return;
+                }
                 try {
-                    const summonerId = `${res.profile?.gameName}#${res.profile?.tagLine}`;
-                    const freshMatches = await invoke("get_rlp_matches", {
-                        summonerId, region: "euw", limit: 5
+                    const more = await invoke("get_more_matches", {
+                        puuid: res.puuid,
+                        start: 0,
                     });
-                    if (freshMatches && freshMatches.length > 0) {
-                        const newestId = freshMatches[0]?.matchId ?? freshMatches[0]?.metadata?.matchId;
+                    const fresh = more?.filter(m => m?.metadata || m?.info) ?? [];
+                    if (fresh.length > 0) {
+                        const newestId = fresh[0]?.metadata?.matchId;
                         if (newestId && newestId !== latestMatchId.current) {
                             console.log("[Refresh] Nuova partita rilevata:", newestId);
                             latestMatchId.current = newestId;
                             setAllMatches(prev => {
-                                const existingIds = new Set(prev.map(m => m?.matchId ?? m?.metadata?.matchId));
-                                const newOnes = freshMatches.filter(m => {
-                                    const id = m?.matchId ?? m?.metadata?.matchId;
+                                const existingIds = new Set(prev.map(m => m?.metadata?.matchId ?? m?.matchId));
+                                const newOnes = fresh.filter(m => {
+                                    const id = m?.metadata?.matchId;
                                     return id && !existingIds.has(id);
                                 });
                                 return newOnes.length > 0 ? [...newOnes, ...prev] : prev;
                             });
                         }
                     }
-                } catch (opggErr) {
-                    // RLP non disponibile: fallback su Riot API
-                    try {
-                        const more = await invoke("get_more_matches", {
-                            puuid: res.puuid,
-                            start: 0,
-                        });
-                        const fresh = more?.filter(m => m?.metadata || m?.info) ?? [];
-                        if (fresh.length > 0) {
-                            const newestId = fresh[0]?.metadata?.matchId;
-                            if (newestId && newestId !== latestMatchId.current) {
-                                console.log("[Refresh Riot] Nuova partita rilevata:", newestId);
-                                latestMatchId.current = newestId;
-                                setAllMatches(prev => {
-                                    const existingIds = new Set(prev.map(m => m?.matchId ?? m?.metadata?.matchId));
-                                    const newOnes = fresh.filter(m => {
-                                        const id = m?.metadata?.matchId;
-                                        return id && !existingIds.has(id);
-                                    });
-                                    return newOnes.length > 0 ? [...newOnes, ...prev] : prev;
-                                });
-                            }
-                        }
-                    } catch (riotErr) {
-                        console.warn("[Refresh] Impossibile controllare nuove partite:", riotErr);
-                    }
+                } catch (riotErr) {
+                    console.warn("[Refresh] Impossibile controllare nuove partite:", riotErr);
                 }
             }
         } catch (err) {
@@ -317,7 +268,7 @@ export default function App() {
 
     useEffect(() => {
         fetchData();
-        const interval = setInterval(fetchData, 10000);
+        const interval = setInterval(fetchData, 60000); // 60s — evita rate limit durante season fetch
         return () => clearInterval(interval);
     }, []);
 
@@ -338,9 +289,6 @@ export default function App() {
             }
         }
         checkForUpdates();
-        const FOUR_HOURS = 4 * 60 * 60 * 1000;
-        const interval = setInterval(checkForUpdates, FOUR_HOURS);
-        return () => clearInterval(interval);
     }, []);
 
     async function handleUpdate() {
@@ -382,8 +330,11 @@ export default function App() {
                 start: matchOffset,
             });
             const raw = more.filter(m => m?.metadata || m?.info);
-            setAllMatches(prev => [...prev, ...raw]);
-            setMatchOffset(prev => prev + more.length);
+            setAllMatches(prev => {
+                const ids = new Set(prev.map(m => m?.metadata?.matchId ?? m?.matchId));
+                return [...prev, ...raw.filter(m => !ids.has(m?.metadata?.matchId ?? m?.matchId))];
+            });
+            setMatchOffset(prev => prev + 10); // sempre +10, non more.length
         } catch (e) {
             console.error("Errore carica altri:", e);
         } finally {
@@ -395,14 +346,18 @@ export default function App() {
         if (!searchData?.puuid) return;
         setLoadingMoreSearch(true);
         try {
-            const offset = searchMatchOffset === 0 ? 10 : searchMatchOffset;
+            // search_summoner fetcha 20 match, quindi il primo batch extra parte da 20
+            const offset = searchMatchOffset === 0 ? 20 : searchMatchOffset;
             const more = await invoke("get_more_matches", {
                 puuid: searchData.puuid,
                 start: offset,
             });
             const raw = more.filter(m => m?.metadata || m?.info);
-            setSearchExtraMatches(prev => [...prev, ...raw]);
-            setSearchMatchOffset(offset + more.length);
+            setSearchExtraMatches(prev => {
+                const ids = new Set(prev.map(m => m?.metadata?.matchId ?? m?.matchId));
+                return [...prev, ...raw.filter(m => !ids.has(m?.metadata?.matchId ?? m?.matchId))];
+            });
+            setSearchMatchOffset(offset + 10); // sempre +10
         } catch (e) {
             console.error("Errore carica altri search:", e);
         } finally {
@@ -412,7 +367,7 @@ export default function App() {
 
     function fetchSeasonMatchesForSearch(puuid) {
         return runSeasonFetch({
-            puuid, startOffset: 10,
+            puuid, startOffset: 20, // search_summoner fetcha 20, quindi partiamo da 20
             setMatches: setSearchExtraMatches,
             setOffset: null,
             setDone: setSearchSeasonFetchDone,
@@ -431,24 +386,7 @@ export default function App() {
             const res = await invoke("search_summoner", { gameName: gameName.trim(), tagLine: tagLine.trim() });
             setSearchData(res);
 
-            // Prova RLP per i match della ricerca
-            try {
-                const summonerId = `${gameName}#${tagLine}`;
-                const opggMatches = await invoke("get_rlp_matches", {
-                    summonerId, region: "euw", limit: 20
-                });
-                if (opggMatches && opggMatches.length > 0) {
-                    setSearchExtraMatches(opggMatches);
-                    setSearchMatchOffset(opggMatches.length);
-                    setSearchSeasonFetchDone(true);
-                    console.log(`[RLP search] ${opggMatches.length} partite`);
-                    return;
-                }
-            } catch (opggErr) {
-                console.warn("[RLP search] Fallback a Riot API:", opggErr);
-            }
-
-            // Fallback: season fetch Riot API
+            // Usa Riot API season fetch
             fetchSeasonMatchesForSearch(res.puuid);
         } catch (err) {
             console.error("[RLP search] Error:", err);
@@ -540,10 +478,12 @@ export default function App() {
         ? `${profileData.profile.gameName}#${profileData.profile.tagLine}`
         : null;
 
-    const searchMatches = [
-        ...(searchData?.matches?.filter(m => m?.metadata || m?.info) || []),
-        ...searchExtraMatches,
-    ];
+    const baseSearchMatches = searchData?.matches?.filter(m => m?.metadata || m?.info) || [];
+    const searchMatches = (() => {
+        const ids = new Set(baseSearchMatches.map(m => m?.metadata?.matchId ?? m?.matchId));
+        const extras = searchExtraMatches.filter(m => !ids.has(m?.metadata?.matchId ?? m?.matchId));
+        return [...baseSearchMatches, ...extras];
+    })();
     const searchRankedSolo = searchData ? mapRankedFromEntries(searchData.ranked_entries, "RANKED_SOLO_5x5") : null;
     const searchRankedFlex = searchData ? mapRankedFromEntries(searchData.ranked_entries, "RANKED_FLEX_SR") : null;
 
@@ -719,41 +659,19 @@ export default function App() {
 
                     <TabsContent value="matches">
                         {searchData ? (
-                            <div className="space-y-4">
-                                <MatchHistoryTab
-                                    matches={searchMatches}
-                                    myPuuid={searchData.puuid}
-                                    mySummonerName={`${searchData.profile?.gameName}#${searchData.profile?.tagLine}`}
-                                    onPlayerClick={handlePlayerClick}
-                                />
-                                <div className="flex justify-center pt-2 pb-6">
-                                    <Button
-                                        onClick={loadMoreSearchMatches}
-                                        disabled={loadingMoreSearch}
-                                        className="bg-[#142545] hover:bg-[#1e3560] text-white px-10"
-                                    >
-                                        {loadingMoreSearch ? "Caricamento..." : "Carica altri 5"}
-                                    </Button>
-                                </div>
-                            </div>
+                            <MatchHistoryTab
+                                matches={searchMatches}
+                                myPuuid={searchData.puuid}
+                                mySummonerName={`${searchData.profile?.gameName}#${searchData.profile?.tagLine}`}
+                                onPlayerClick={handlePlayerClick}
+                            />
                         ) : profileData ? (
-                            <div className="space-y-4">
-                                <MatchHistoryTab
-                                    matches={allMatches}
-                                    myPuuid={myPuuid}
-                                    mySummonerName={mySummonerName}
-                                    onPlayerClick={handlePlayerClick}
-                                />
-                                <div className="flex justify-center pt-2 pb-6">
-                                    <Button
-                                        onClick={loadMoreMatches}
-                                        disabled={loadingMore}
-                                        className="bg-[#142545] hover:bg-[#1e3560] text-white px-10"
-                                    >
-                                        {loadingMore ? "Caricamento..." : "Carica altri 5"}
-                                    </Button>
-                                </div>
-                            </div>
+                            <MatchHistoryTab
+                                matches={allMatches}
+                                myPuuid={myPuuid}
+                                mySummonerName={mySummonerName}
+                                onPlayerClick={handlePlayerClick}
+                            />
                         ) : (
                             <div className="flex items-center justify-center h-64">
                                 {loading ? (
