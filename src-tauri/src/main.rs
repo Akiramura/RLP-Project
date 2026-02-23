@@ -2056,7 +2056,7 @@ async fn get_match_timeline(match_id: String) -> Result<Value, String> {
 }
 
 /// Suggerimenti di ricerca: cerca nella Neon cache per nome/tag parziale (ILIKE).
-/// Ritorna fino a 6 summoner che matchano la query, con profilo e rank per il dropdown.
+/// Ritorna fino a 6 summoner che matchano la query, con profilo e rank per il dropdownn.
 #[tauri::command]
 async fn search_summoner_suggestions(query: String) -> Result<Value, String> {
     let q = query.trim().to_string();
