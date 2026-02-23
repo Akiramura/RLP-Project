@@ -115,8 +115,8 @@ export function ChampSelectTab() {
             // Aspetta che il campione sia stato selezionato/hoverato
             if (!session.champion_name) return;
 
-            const key = `${session.champion_name}_${session.assigned_position}`;
-            if (lastChampRef.current === key) return; // già importato per questo campione+lane
+            const key = `${session.champion_name}_${session.assigned_position}_${session.game_mode ?? "ranked"}`;
+            if (lastChampRef.current === key) return; // già importato per questo campione+lane+mode
             lastChampRef.current = key;
 
             setChampData(session);
@@ -142,6 +142,7 @@ export function ChampSelectTab() {
             const result = await invoke("auto_import_build", {
                 championName: session.champion_name,
                 assignedPosition: session.assigned_position || "DEFAULT",
+                gameMode: session.game_mode || "ranked",
             });
 
             setImportResult(result);
@@ -203,6 +204,11 @@ export function ChampSelectTab() {
                         {champData?.assigned_position && (
                             <Badge className="mt-1 bg-[#1459d4] text-white border-0 capitalize">
                                 {champData.assigned_position.toLowerCase()}
+                            </Badge>
+                        )}
+                        {champData?.game_mode && champData.game_mode !== "ranked" && (
+                            <Badge className="mt-1 ml-1 bg-[#7c3aed] text-white border-0 uppercase text-xs">
+                                {champData.game_mode}
                             </Badge>
                         )}
                         <p className={`mt-2 text-sm font-medium

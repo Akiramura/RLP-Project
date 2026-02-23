@@ -44,6 +44,98 @@ export default function App() {
     const [searchSeasonFetchDone, setSearchSeasonFetchDone] = useState(false);
     const searchSeasonFetchRunning = useRef(false);
 
+    // ── Cronologia ricerche + suggerimenti live ──────────────────────────────
+    const HISTORY_KEY = "rlp_search_history";
+    const MAX_HISTORY = 5;
+    // Ogni entry: { name, tag, profileIconId, tier, rank, lp }
+    const [searchHistory, setSearchHistory] = useState(() => {
+        try { return JSON.parse(localStorage.getItem(HISTORY_KEY) || "[]"); }
+        catch { return []; }
+    });
+    const [showDropdown, setShowDropdown] = useState(false);
+    const searchWrapperRef = useRef(null);
+    const debounceRef = useRef(null);
+    // Suggerimenti live dalla Riot API mentre si digita (come OP.GG)
+    const [liveSuggestions, setLiveSuggestions] = useState([]);
+    const [loadingSuggestions, setLoadingSuggestions] = useState(false);
+
+    // Chiudi dropdown se si clicca fuori
+    useEffect(() => {
+        function onClickOutside(e) {
+            if (searchWrapperRef.current && !searchWrapperRef.current.contains(e.target)) {
+                setShowDropdown(false);
+            }
+        }
+        document.addEventListener("mousedown", onClickOutside);
+        return () => document.removeEventListener("mousedown", onClickOutside);
+    }, []);
+
+    function saveHistory(entry) {
+        const key = `${entry.name}#${entry.tag}`.toLowerCase();
+        setSearchHistory(prev => {
+            const next = [
+                entry,
+                ...prev.filter(e => `${e.name}#${e.tag}`.toLowerCase() !== key)
+            ].slice(0, MAX_HISTORY);
+            try { localStorage.setItem(HISTORY_KEY, JSON.stringify(next)); } catch { }
+            return next;
+        });
+    }
+
+    function removeFromHistory(entry, e) {
+        e.stopPropagation();
+        const key = `${entry.name}#${entry.tag}`.toLowerCase();
+        setSearchHistory(prev => {
+            const next = prev.filter(e => `${e.name}#${e.tag}`.toLowerCase() !== key);
+            try { localStorage.setItem(HISTORY_KEY, JSON.stringify(next)); } catch { }
+            return next;
+        });
+    }
+
+    // Filtra la cronologia in base a ciò che si sta digitando
+    const filteredHistory = searchQuery.trim().length > 0
+        ? searchHistory.filter(h =>
+            `${h.name}#${h.tag}`.toLowerCase().includes(searchQuery.trim().toLowerCase())
+        )
+        : searchHistory;
+
+    // Suggestions da mostrare: se c'è input mostra live (se disponibili) + history filtrata
+    // Se nessun input mostra solo history recenti
+    const dropdownItems = searchQuery.trim().length > 0
+        ? [
+            ...liveSuggestions.map(s => ({ ...s, _live: true })),
+            ...filteredHistory.filter(h =>
+                !liveSuggestions.some(s => `${s.name}#${s.tag}`.toLowerCase() === `${h.name}#${h.tag}`.toLowerCase())
+            )
+        ]
+        : filteredHistory;
+
+    // Suggerimenti live: debounce 400ms, chiama invoke("search_summoner_suggestions") se disponibile,
+    // altrimenti usa solo la cronologia filtrata
+    function onSearchInput(val) {
+        setSearchQuery(val);
+        setShowDropdown(true);
+        clearTimeout(debounceRef.current);
+        if (!val.trim() || val.trim().length < 2) {
+            setLiveSuggestions([]);
+            return;
+        }
+        debounceRef.current = setTimeout(async () => {
+            // Tenta di chiamare un comando Tauri per suggerimenti live
+            // Se non disponibile, usa solo la history
+            try {
+                setLoadingSuggestions(true);
+                const res = await invoke("search_summoner_suggestions", { query: val.trim() });
+                if (Array.isArray(res)) setLiveSuggestions(res.slice(0, 5));
+            } catch {
+                // Comando non disponibile: nessun problema, usiamo solo history
+                setLiveSuggestions([]);
+            } finally {
+                setLoadingSuggestions(false);
+            }
+        }, 400);
+    }
+
     // Stato per i match extra della search
     const [searchMatchOffset, setSearchMatchOffset] = useState(0);
     const [searchExtraMatches, setSearchExtraMatches] = useState([]);
@@ -52,7 +144,9 @@ export default function App() {
     const [activeTab, setActiveTab] = useState("profile");
     const [isInChampSelect, setIsInChampSelect] = useState(false);
     const [liveMetaData, setLiveMetaData] = useState({});
-    const [liveGamePuuid, setLiveGamePuuid] = useState(null); // puuid override per LiveGameTab
+    const [liveGamePuuid, setLiveGamePuuid] = useState(null); // puuid del profilo attivo per LiveGameTab
+    // Ref per accedere al puuid più aggiornato dentro handleTabChange senza dipendenze
+    const liveGamePuuidRef = useRef(null);
     const [isInLiveGame, setIsInLiveGame] = useState(false); // profilo attivo in partita live?
     const champSelectPollRef = useRef(null);
     const liveGamePollRef = useRef(null);
@@ -87,6 +181,18 @@ export default function App() {
         checkChampSelect();
         return () => clearInterval(champSelectPollRef.current);
     }, []);
+
+    // Sincronizza liveGamePuuid quando cambia il profilo attivo (es. clearSearch o nuovo profilo caricato)
+    // ma SOLO se la live-game tab è quella attiva, per non disturbare le altre tab
+    useEffect(() => {
+        if (activeTab === "live-game") {
+            const activePuuid = searchData?.puuid ?? profileData?.puuid ?? null;
+            if (activePuuid !== liveGamePuuidRef.current) {
+                liveGamePuuidRef.current = activePuuid;
+                setLiveGamePuuid(activePuuid);
+            }
+        }
+    }, [searchData?.puuid, profileData?.puuid, activeTab]);
 
     // Poll live game status per mostrare indicatore visivo su tab e pulsante
     useEffect(() => {
@@ -396,9 +502,22 @@ export default function App() {
         setSearchMatchOffset(0);
         setSearchSeasonFetchDone(false);
         searchSeasonFetchRunning.current = false;
+        setShowDropdown(false);
+        setLiveSuggestions([]);
         try {
             const res = await invoke("search_summoner", { gameName: gameName.trim(), tagLine: tagLine.trim() });
             setSearchData(res);
+
+            // Salva in cronologia con icona e rank
+            const soloEntry = res?.ranked_entries?.find(e => e.queueType === "RANKED_SOLO_5x5");
+            saveHistory({
+                name: res?.profile?.gameName ?? gameName.trim(),
+                tag: res?.profile?.tagLine ?? tagLine.trim(),
+                profileIconId: res?.profile?.profileIconId ?? null,
+                tier: soloEntry?.tier ?? "",
+                rank: soloEntry?.rank ?? soloEntry?.division ?? "",
+                lp: soloEntry?.leaguePoints ?? 0,
+            });
 
             // Popola seenSearchMatchIds con i match già caricati da search_summoner
             const initialMatches = res?.matches?.filter(m => m?.metadata || m?.info) || [];
@@ -436,7 +555,9 @@ export default function App() {
     }
 
     function handleViewLiveGame(puuid) {
-        setLiveGamePuuid(puuid || null);
+        const target = puuid || null;
+        liveGamePuuidRef.current = target;
+        setLiveGamePuuid(target);
         setActiveTab("live-game");
     }
 
@@ -444,12 +565,18 @@ export default function App() {
         if (tab === "live-game") {
             // Usa il puuid del profilo attualmente visualizzato (search o proprio)
             const activePuuid = searchData?.puuid ?? myPuuid ?? null;
+            liveGamePuuidRef.current = activePuuid;
             setLiveGamePuuid(activePuuid);
         }
         setActiveTab(tab);
     }
 
     function clearSearch() {
+        // Aggiorna il puuid della live game tab al proprio profilo prima di pulire la ricerca
+        const ownPuuid = profileData?.puuid ?? null;
+        liveGamePuuidRef.current = ownPuuid;
+        setLiveGamePuuid(ownPuuid);
+
         setSearchData(null);
         setSearchQuery("");
         setSearchError(null);
@@ -527,15 +654,121 @@ export default function App() {
                             </div>
                         </div>
                         <div className="flex items-center gap-3">
-                            <div className="relative hidden md:block">
-                                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[#5a8ab0]" />
+                            {/* Search con dropdown cronologia + suggerimenti live */}
+                            <div className="relative hidden md:block" ref={searchWrapperRef}>
+                                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[#5a8ab0] pointer-events-none z-10" />
                                 <Input
                                     placeholder="Nome Summoner#TAG"
                                     value={searchQuery}
-                                    onChange={e => setSearchQuery(e.target.value)}
-                                    onKeyDown={handleSearch}
-                                    className="pl-10 w-64 bg-[#0d1f38] border-[#1a3558] text-white placeholder:text-[#3a6080]"
+                                    onChange={e => onSearchInput(e.target.value)}
+                                    onFocus={() => setShowDropdown(true)}
+                                    onKeyDown={e => {
+                                        if (e.key === "Escape") { setShowDropdown(false); return; }
+                                        handleSearch(e);
+                                    }}
+                                    className="pl-10 w-72 bg-[#0d1f38] border-[#1a3558] text-white placeholder:text-[#3a6080] focus:border-[#1e6fff] transition-colors"
                                 />
+                                {/* Dropdown */}
+                                {showDropdown && (dropdownItems.length > 0 || loadingSuggestions) && (
+                                    <div className="absolute top-full left-0 mt-1.5 w-full bg-[#08162b] border border-[#1a3558] rounded-xl shadow-2xl z-50 overflow-hidden">
+                                        {/* Header dropdown */}
+                                        <div className="flex items-center justify-between px-3 pt-2 pb-1 border-b border-[#0f2040]">
+                                            <span className="text-[#3a6080] text-[12px] font-bold uppercase tracking-widest">
+                                                {searchQuery.trim().length > 0 ? "Risultati" : "Recenti"}
+                                            </span>
+                                            <div className="flex items-center gap-2">
+                                                {loadingSuggestions && (
+                                                    <span className="text-[#3a6080] text-[12px]">...</span>
+                                                )}
+                                                {searchHistory.length > 0 && !searchQuery.trim() && (
+                                                    <button
+                                                        onClick={() => {
+                                                            setSearchHistory([]);
+                                                            try { localStorage.removeItem(HISTORY_KEY); } catch { }
+                                                        }}
+                                                        className="text-[#2a5070] hover:text-red-400 text-[12px] transition-colors"
+                                                    >
+                                                        Cancella
+                                                    </button>
+                                                )}
+                                            </div>
+                                        </div>
+
+                                        {/* Items */}
+                                        {dropdownItems.map((entry, i) => {
+                                            const PATCH_LOCAL = "16.4.1";
+                                            const tierColor = {
+                                                IRON: "text-[#8ab0cc]", BRONZE: "text-amber-600",
+                                                SILVER: "text-[#9ab8d0]", GOLD: "text-yellow-400",
+                                                PLATINUM: "text-teal-400", EMERALD: "text-emerald-400",
+                                                DIAMOND: "text-[#4fc3f7]", MASTER: "text-purple-400",
+                                                GRANDMASTER: "text-red-400", CHALLENGER: "text-yellow-300",
+                                            }[entry.tier?.toUpperCase()] ?? "text-[#5a8ab0]";
+                                            const tierLabel = entry.tier
+                                                ? `${entry.tier.charAt(0).toUpperCase()}${entry.tier.slice(1).toLowerCase()}${!["MASTER", "GRANDMASTER", "CHALLENGER"].includes(entry.tier?.toUpperCase()) && entry.rank ? ` ${entry.rank}` : ""}`
+                                                : null;
+
+                                            return (
+                                                <div
+                                                    key={i}
+                                                    className="flex items-center gap-2 px-3 py-1.5 hover:bg-[#0d1f38] cursor-pointer group transition-colors"
+                                                    onClick={() => {
+                                                        const q = `${entry.name}#${entry.tag}`;
+                                                        setSearchQuery(q);
+                                                        setShowDropdown(false);
+                                                        setActiveTab("profile");
+                                                        doSearch(entry.name, entry.tag);
+                                                    }}
+                                                >
+                                                    {/* Avatar */}
+                                                    <div className="relative shrink-0">
+                                                        {entry.profileIconId ? (
+                                                            <img
+                                                                src={`https://ddragon.leagueoflegends.com/cdn/${PATCH_LOCAL}/img/profileicon/${entry.profileIconId}.png`}
+                                                                alt=""
+                                                                className="w-7 h-7 rounded-full object-cover border border-[#1a3558]"
+                                                                onError={e => { e.target.style.display = "none"; }}
+                                                            />
+                                                        ) : (
+                                                            <div className="w-7 h-7 rounded-full bg-[#142545] border border-[#1a3558] flex items-center justify-center">
+                                                                <User className="w-3 h-3 text-[#3a6080]" />
+                                                            </div>
+                                                        )}
+                                                        {entry._live && (
+                                                            <span className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 bg-[#1e6fff] rounded-full border border-[#08162b]" />
+                                                        )}
+                                                    </div>
+
+                                                    {/* Info */}
+                                                    <div className="flex-1 min-w-0">
+                                                        <div className="flex items-center gap-1.5">
+                                                            <span className="text-white text-sm font-semibold truncate">{entry.name}</span>
+                                                            <span className="text-[#3a6080] text-sm shrink-0">#{entry.tag}</span>
+                                                        </div>
+                                                        {tierLabel ? (
+                                                            <span className={`text-[12px] font-medium ${tierColor}`}>
+                                                                {tierLabel}{entry.lp > 0 ? ` · ${entry.lp}LP` : ""}
+                                                            </span>
+                                                        ) : (
+                                                            <span className="text-[#3a6080] text-[12px]">Unranked</span>
+                                                        )}
+                                                    </div>
+
+                                                    {/* Remove (solo history) */}
+                                                    {!entry._live && (
+                                                        <button
+                                                            onClick={e => removeFromHistory(entry, e)}
+                                                            className="text-[#2a5070] hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all shrink-0 p-1"
+                                                            title="Rimuovi"
+                                                        >
+                                                            <X className="w-3.5 h-3.5" />
+                                                        </button>
+                                                    )}
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                )}
                             </div>
                             <Button
                                 onClick={handleSearch}

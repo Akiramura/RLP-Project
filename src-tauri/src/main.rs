@@ -262,6 +262,66 @@ async fn db_save_summoner(puuid: &str, profile: &Value, ranked_entries: &Value, 
     }
 }
 
+/// Indicizza i partecipanti di un live game nella summoner_cache.
+/// Usa INSERT ... ON CONFLICT DO NOTHING per non sovrascrivere dati ricchi già presenti.
+/// Salva solo gameName + tagLine + profileIconId (dati minimi disponibili dallo Spectator/LCD).
+/// Questo arricchisce il live search anche per giocatori mai cercati esplicitamente.
+async fn db_index_live_players(players: &[Value]) {
+    let pool: &Pool = match get_pool().await { Some(p) => p, None => return };
+    let pg = match pool.get().await {
+        Ok(c)  => c,
+        Err(e) => { eprintln!("❌ db_index_live_players pool: {}", e); return; }
+    };
+
+    let mut indexed = 0usize;
+    for player in players {
+        // Ricava puuid — se manca non possiamo indicizzare
+        let puuid = player["puuid"].as_str().unwrap_or("");
+        if puuid.is_empty() { continue; }
+
+        // Ricava game_name e tag_line dal campo summoner_name ("Nome#TAG") oppure da campi separati
+        let summoner_name = player["summoner_name"].as_str().unwrap_or("");
+        let (game_name, tag_line) = if summoner_name.contains('#') {
+            let mut parts = summoner_name.splitn(2, '#');
+            (
+                parts.next().unwrap_or("").to_string(),
+                parts.next().unwrap_or("").to_string(),
+            )
+        } else {
+            // Niente tag → non abbastanza dati per una ricerca utile
+            continue;
+        };
+
+        if game_name.is_empty() || tag_line.is_empty() { continue; }
+
+        let profile_icon = player["profile_icon_id"].as_u64().unwrap_or(0);
+        let profile = json!({
+            "gameName":      game_name,
+            "tagLine":       tag_line,
+            "profileIconId": profile_icon,
+            "summonerLevel": player["summoner_level"],
+        });
+        let empty_arr = json!([]);
+        let empty_matches = json!([]);
+
+        // ON CONFLICT DO NOTHING: se il summoner ha già dati ricchi (match, rank) non li tocchiamo
+        match pg.execute(
+            "INSERT INTO summoner_cache
+               (puuid, game_name, tag_line, profile, ranked_entries, matches, cached_at)
+             VALUES ($1, $2, $3, $4, $5, $6, NOW())
+             ON CONFLICT (puuid) DO NOTHING",
+            &[&puuid, &game_name.as_str(), &tag_line.as_str(), &profile, &empty_arr, &empty_matches],
+        ).await {
+            Ok(n)  => if n > 0 { indexed += 1; },
+            Err(e) => eprintln!("❌ db_index_live_players {}: {}", puuid, e),
+        }
+    }
+
+    if indexed > 0 {
+        println!("[LiveIndex] Indicizzati {} nuovi summoner dal live game.", indexed);
+    }
+}
+
 /// Recupera profilo, ranked e match via Riot API pubblica (senza LCU).
 /// Usata quando il client è chiuso per avere dati freschi.
 async fn fetch_profile_from_riot_api(
@@ -1316,10 +1376,17 @@ fn build_live_game_from_lcd(lcd: &Value, my_summoner_name: &str) -> Value {
     let game_data  = &lcd["gameData"];
     let queue_id   = game_data["gameMode"].as_str().unwrap_or("");
     let queue_type = match queue_id {
-        "CLASSIC"  => "Normal/Ranked",
-        "ARAM"     => "ARAM",
-        "TUTORIAL" => "Tutorial",
-        _          => queue_id,
+        "CLASSIC"           => "Normal/Ranked",
+        "ARAM"              => "ARAM",
+        "URF"               => "URF",
+        "ARURF"             => "ARURF",
+        "ONEFORALL"         => "One for All",
+        "NEXUSBLITZ"        => "Nexus Blitz",
+        "ULTBOOK"           => "Ultimate Spellbook",
+        "CHERRY"            => "Arena",
+        "TUTORIAL"          => "Tutorial",
+        "PRACTICETOOL"      => "Practice Tool",
+        other               => other,
     }.to_string();
 
     let game_time_f = game_data["gameTime"].as_f64().unwrap_or(0.0);
@@ -1369,18 +1436,24 @@ fn build_live_game_from_lcd(lcd: &Value, my_summoner_name: &str) -> Value {
             .as_str().unwrap_or("SummonerFlash");
 
         json!({
-            "summoner_name":   name,
-            "puuid":           "",
-            "champion_id":     0,
-            "champion_name":   champ,
-            "profile_icon_id": 0,
-            "team":            team_str,
-            "spell1":          map_spell(spell1),
-            "spell2":          map_spell(spell2),
-            "tier":            "",
-            "rank":            "",
-            "lp":              0,
-            "is_me":           is_me,
+            "summoner_name":     name,
+            "puuid":             "",
+            "champion_id":       0,
+            "champion_name":     champ,
+            "profile_icon_id":   0,
+            "team":              team_str,
+            "spell1":            map_spell(spell1),
+            "spell2":            map_spell(spell2),
+            "tier":              "",
+            "rank":              "",
+            "lp":                0,
+            "is_me":             is_me,
+            // Smart badge fields — vuoti per LCD (nessun PUUID disponibile)
+            "summoner_level":    null,
+            "main_champion":     null,
+            "main_role":         null,
+            "total_games":       0,
+            "games_on_champion": 0,
         })
     }).collect();
 
@@ -1412,9 +1485,12 @@ async fn fetch_spectator(puuid: &str, client: &Client) -> Option<Value> {
         "https://euw1.api.riotgames.com/lol/spectator/v5/active-games/by-summoner/{}",
         puuid
     );
-    let res = match client.get(&url).header("X-Riot-Token", riot_api_key()).send().await {
+    let res = match client.get(&url)
+        .header("X-Riot-Token", riot_api_key())
+        .timeout(std::time::Duration::from_secs(8))
+        .send().await {
         Ok(r)  => r,
-        Err(e) => { eprintln!("[Spectator] Errore rete: {}", e); return None; }
+        Err(e) => { eprintln!("[Spectator] Errore rete/timeout: {}", e); return None; }
     };
     let code = res.status().as_u16();
     eprintln!("[Spectator] HTTP {} per puuid={}", code, &puuid[..puuid.len().min(20)]);
@@ -1464,13 +1540,132 @@ async fn fetch_ranked_entry(puuid: String, client: Client) -> (String, String, i
     (String::new(), String::new(), 0)
 }
 
+/// Cerca nella Neon summoner_cache i dati per i smart badge:
+/// summoner_level, main_role (lane più giocata), main_champion (champ più giocato),
+/// total_games (partite in cache), games_on_champion (partite sul champ più giocato).
+/// Se il puuid non è in cache restituisce None silenziosamente.
+async fn smart_data_from_cache(puuid: &str) -> Option<Value> {
+    if puuid.is_empty() { return None; }
+    let pool = get_pool().await?;
+    let pg   = pool.get().await
+        .map_err(|e| eprintln!("[smart_data] pool error: {}", e)).ok()?;
+
+    let row = pg.query_opt(
+        "SELECT profile::text, matches::text FROM summoner_cache WHERE puuid = $1",
+        &[&puuid],
+    ).await.ok()??;
+
+    let profile: Value = serde_json::from_str(&row.get::<_, String>(0)).ok()?;
+    let matches: Value = serde_json::from_str(&row.get::<_, String>(1)).ok()?;
+
+    let summoner_level = profile["summonerLevel"].as_u64();
+
+    let mut champ_counts: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    let mut role_counts:  std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    let mut total_games: u64 = 0;
+
+    if let Some(arr) = matches.as_array() {
+        for m in arr {
+            let participants = m["info"]["participants"].as_array()
+                .cloned().unwrap_or_default();
+            if let Some(me) = participants.iter().find(|p| p["puuid"].as_str() == Some(puuid)) {
+                total_games += 1;
+                // Champion name (Riot Match V5)
+                if let Some(champ) = me["championName"].as_str() {
+                    if !champ.is_empty() {
+                        *champ_counts.entry(champ.to_string()).or_insert(0) += 1;
+                    }
+                }
+                // Lane/role: teamPosition è la più affidabile (TOP/JUNGLE/MIDDLE/BOTTOM/UTILITY)
+                let role = me["teamPosition"].as_str()
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| me["individualPosition"].as_str().filter(|s| !s.is_empty()))
+                    .or_else(|| me["lane"].as_str().filter(|s| !s.is_empty() && *s != "NONE"));
+                if let Some(r) = role {
+                    *role_counts.entry(r.to_string()).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+
+    let main_champion: Option<String> = champ_counts.iter()
+        .max_by_key(|(_, v)| *v)
+        .map(|(k, _)| k.clone());
+
+    let main_role: Option<String> = role_counts.iter()
+        .max_by_key(|(_, v)| *v)
+        .map(|(k, _)| k.clone());
+
+    // Partite giocate sul campione principale (proxy per games_on_champion)
+    let games_on_main_champ: u64 = main_champion.as_ref()
+        .and_then(|c| champ_counts.get(c))
+        .copied()
+        .unwrap_or(0);
+
+    eprintln!(
+        "[smart_data] puuid={} lvl={:?} main_champ={:?} main_role={:?} total={} goc={}",
+        &puuid[..puuid.len().min(20)],
+        summoner_level, main_champion, main_role, total_games, games_on_main_champ
+    );
+
+    Some(json!({
+        "summoner_level":      summoner_level,
+        "main_champion":       main_champion,
+        "main_role":           main_role,
+        "total_games":         total_games,
+        "games_on_main_champ": games_on_main_champ,
+        // Mappa completa dei conteggi per campione (per games_on_champion accurato)
+        "champ_counts":        champ_counts,
+    }))
+}
+
 /// Normalizza Spectator-V5 recuperando i rank in parallelo con tokio::spawn.
 async fn build_live_game_response(raw: &Value, my_puuid: &str, client: &Client) -> Value {
     let queue_id   = raw["gameQueueConfigId"].as_u64().unwrap_or(0);
     let queue_type = match queue_id {
-        420 => "Ranked Solo/Duo", 440 => "Ranked Flex",
-        430 => "Normal Blind",    400 => "Normal Draft",
-        450 => "ARAM",            _   => "Other",
+        // Ranked
+        420  => "Ranked Solo/Duo",
+        440  => "Ranked Flex",
+        // Normal
+        400  => "Normal Draft",
+        430  => "Normal Blind",
+        // ARAM
+        450  => "ARAM",
+        // URF / ARURF
+        900  => "URF",
+        1900 => "URF",
+        1010 => "ARURF",
+        1012 => "ARURF",
+        // One for All
+        1020 => "One for All",
+        // Arena (2v2v2v2)
+        1700 => "Arena",
+        1710 => "Arena",
+        // Ultimate Spellbook
+        1400 => "Ultimate Spellbook",
+        // Nexus Blitz
+        700  => "Nexus Blitz",
+        // Clash
+        600  => "Clash",
+        // Rotating/misc
+        830  => "Intro Bot",
+        840  => "Beginner Bot",
+        850  => "Intermediate Bot",
+        2000 => "Tutorial 1",
+        2010 => "Tutorial 2",
+        2020 => "Tutorial 3",
+        // Swiftplay
+        480  => "Swiftplay",
+        // Draft Pick 5v5
+        490  => "Normal Draft (Quickplay)",
+        // Snow/event variants
+        1300 => "Nexus Blitz",
+        325  => "All Random",
+        72   => "1v1 Snowdown",
+        73   => "2v2 Snowdown",
+        76   => "URF",
+        318  => "URF",
+        _    => "Other",
     }.to_string();
 
     let game_length     = raw["gameLength"].as_u64().unwrap_or(0);
@@ -1499,8 +1694,22 @@ async fn build_live_game_response(raw: &Value, my_puuid: &str, client: &Client) 
         ranks.push(h.await.unwrap_or_default());
     }
 
-    let players: Vec<Value> = participants.iter().zip(ranks.iter())
-        .map(|(p, (tier, rank, lp))| {
+    // ── Smart data (per badge smurf / off-role / OTP / main bannato) ─────────
+    // Legge dalla Neon summoner_cache — zero API call extra, latenza minima.
+    let smart_handles: Vec<_> = participants.iter().map(|p| {
+        let puuid_s = p["puuid"].as_str().unwrap_or("").to_string();
+        tokio::spawn(async move { smart_data_from_cache(&puuid_s).await })
+    }).collect();
+
+    let mut smart_data: Vec<Option<Value>> = Vec::new();
+    for h in smart_handles {
+        smart_data.push(h.await.unwrap_or(None));
+    }
+
+    let players: Vec<Value> = participants.iter()
+        .zip(ranks.iter())
+        .zip(smart_data.iter())
+        .map(|((p, (tier, rank, lp)), smart)| {
             let champ_id      = p["championId"].as_u64().unwrap_or(0);
             let team_id       = p["teamId"].as_u64().unwrap_or(100);
             let puuid_p       = p["puuid"].as_str().unwrap_or("");
@@ -1512,19 +1721,47 @@ async fn build_live_game_response(raw: &Value, my_puuid: &str, client: &Client) 
             } else {
                 p["summonerName"].as_str().unwrap_or("").to_string()
             };
+
+            // Estrai i valori smart (se disponibili dalla cache Neon)
+            let (summoner_level, main_champion, main_role, total_games, games_on_champion) =
+                if let Some(sd) = smart {
+                    let lvl   = sd["summoner_level"].as_u64();
+                    let mc    = sd["main_champion"].as_str().map(|s| s.to_string());
+                    let mr    = sd["main_role"].as_str().map(|s| s.to_string());
+                    let tg    = sd["total_games"].as_u64().unwrap_or(0);
+                    // Se il campione corrente è in cache, usa il suo conteggio specifico
+                    let goc   = sd["champ_counts"].as_object()
+                        .and_then(|_| {
+                            // champ_counts è serializzato come {"ChampName": count, ...}
+                            // ma il champ_id qui è numerico; usiamo games_on_main_champ come proxy
+                            // (il frontend usa games_on_champion vs total_games per OTP)
+                            sd["games_on_main_champ"].as_u64()
+                        })
+                        .unwrap_or(0);
+                    (lvl, mc, mr, tg, goc)
+                } else {
+                    (None, None, None, 0u64, 0u64)
+                };
+
             json!({
-                "summoner_name":   name,
-                "puuid":           puuid_p,
-                "champion_id":     champ_id,
-                "champion_name":   "",
-                "profile_icon_id": profile_icon,
-                "team":            if team_id == 100 { "ORDER" } else { "CHAOS" },
-                "spell1":          spell_id_to_ddragon(p["spell1Id"].as_u64().unwrap_or(0)),
-                "spell2":          spell_id_to_ddragon(p["spell2Id"].as_u64().unwrap_or(0)),
-                "tier":            tier,
-                "rank":            rank,
-                "lp":              lp,
-                "is_me":           is_me,
+                "summoner_name":     name,
+                "puuid":             puuid_p,
+                "champion_id":       champ_id,
+                "champion_name":     "",
+                "profile_icon_id":   profile_icon,
+                "team":              if team_id == 100 { "ORDER" } else { "CHAOS" },
+                "spell1":            spell_id_to_ddragon(p["spell1Id"].as_u64().unwrap_or(0)),
+                "spell2":            spell_id_to_ddragon(p["spell2Id"].as_u64().unwrap_or(0)),
+                "tier":              tier,
+                "rank":              rank,
+                "lp":                lp,
+                "is_me":             is_me,
+                // ── Smart badge fields ─────────────────────────────────────
+                "summoner_level":    summoner_level,
+                "main_champion":     main_champion,
+                "main_role":         main_role,
+                "total_games":       total_games,
+                "games_on_champion": games_on_champion,
             })
         })
         .collect();
@@ -1570,6 +1807,9 @@ async fn build_live_game_response(raw: &Value, my_puuid: &str, client: &Client) 
             }
         }
     }
+
+    // Indicizza i partecipanti nel DB per arricchire il live search futuro (fire-and-forget)
+    db_index_live_players(&players).await;
 
     json!({
         "in_game":         true,
@@ -1662,6 +1902,48 @@ async fn get_live_game() -> Result<Value, String> {
                 }
             }
         }
+
+        // Arricchisce con smart data (smurf/OTP/main role) dalla Neon cache
+        // Il PUUID era già stato risolto durante il fetch del rank — lo recuperiamo di nuovo.
+        let players_snap2 = resp["players"].as_array().cloned().unwrap_or_default();
+        let smart_handles: Vec<_> = players_snap2.iter().map(|p| {
+            let name    = p["summoner_name"].as_str().unwrap_or("").to_string();
+            let client3 = client.clone();
+            tokio::spawn(async move {
+                let parts: Vec<&str> = name.splitn(2, '#').collect();
+                let puuid = if parts.len() == 2 {
+                    fetch_puuid(parts[0], parts[1], &client3).await.unwrap_or_default()
+                } else { String::new() };
+                let smart = if !puuid.is_empty() {
+                    smart_data_from_cache(&puuid).await
+                } else { None };
+                (name, smart)
+            })
+        }).collect();
+
+        let mut smart_map: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+        for h in smart_handles {
+            if let Ok((name, Some(sd))) = h.await {
+                smart_map.insert(name, sd);
+            }
+        }
+
+        if let Some(arr) = resp["players"].as_array_mut() {
+            for p in arr.iter_mut() {
+                let name = p["summoner_name"].as_str().unwrap_or("").to_string();
+                if let Some(sd) = smart_map.get(&name) {
+                    p["summoner_level"]    = sd["summoner_level"].clone();
+                    p["main_champion"]     = sd["main_champion"].clone();
+                    p["main_role"]         = sd["main_role"].clone();
+                    p["total_games"]       = sd["total_games"].clone();
+                    p["games_on_champion"] = sd["games_on_main_champ"].clone();
+                }
+            }
+        }
+        // Indicizza i partecipanti LCD nel DB per arricchire il live search (fire-and-forget)
+        if let Some(arr) = resp["players"].as_array() {
+            db_index_live_players(arr).await;
+        }
         return Ok(resp);
     }
 
@@ -1675,14 +1957,34 @@ async fn get_live_game() -> Result<Value, String> {
 
 /// Live Game per qualsiasi summoner (dalla tab profilo / ricerca).
 /// Non può usare LCD (solo per il giocatore locale), usa Spectator V5.
+/// Ritenta fino a 2 volte in caso di errore transitorio (429, 5xx).
 #[tauri::command]
 async fn check_live_game(puuid: String) -> Result<Value, String> {
     eprintln!("[check_live_game] Checking puuid={}", &puuid[..puuid.len().min(20)]);
-    let client = Client::builder().danger_accept_invalid_certs(true).build().unwrap();
-    match fetch_spectator(&puuid, &client).await {
-        None      => Ok(json!({ "in_game": false, "game_time": 0, "queue_type": "", "players": [] })),
-        Some(raw) => Ok(build_live_game_response(&raw, &puuid, &client).await),
+    if puuid.is_empty() {
+        return Ok(json!({ "in_game": false, "game_time": 0, "queue_type": "", "players": [] }));
     }
+    let client = Client::builder()
+        .danger_accept_invalid_certs(true)
+        .timeout(std::time::Duration::from_secs(10))
+        .build().unwrap();
+
+    // Retry su errori transitori (429 rate limit, 5xx server error)
+    for attempt in 0..3u32 {
+        match fetch_spectator(&puuid, &client).await {
+            None => {
+                // 404 = non in partita, 403 = forbidden → no retry
+                eprintln!("[check_live_game] fetch_spectator None (attempt {})", attempt);
+                return Ok(json!({ "in_game": false, "game_time": 0, "queue_type": "", "players": [] }));
+            }
+            Some(raw) => {
+                eprintln!("[check_live_game] Partita trovata (attempt {}), building response...", attempt);
+                let resp = build_live_game_response(&raw, &puuid, &client).await;
+                return Ok(resp);
+            }
+        }
+    }
+    Ok(json!({ "in_game": false, "game_time": 0, "queue_type": "", "players": [] }))
 }
 
 
@@ -1753,6 +2055,83 @@ async fn get_match_timeline(match_id: String) -> Result<Value, String> {
     Err("Timeline fetch fallita dopo 3 tentativi".into())
 }
 
+/// Suggerimenti di ricerca: cerca nella Neon cache per nome/tag parziale (ILIKE).
+/// Ritorna fino a 6 summoner che matchano la query, con profilo e rank per il dropdown.
+#[tauri::command]
+async fn search_summoner_suggestions(query: String) -> Result<Value, String> {
+    let q = query.trim().to_string();
+    if q.len() < 2 {
+        return Ok(json!([]));
+    }
+
+    let pool = match get_pool().await {
+        Some(p) => p,
+        None    => return Ok(json!([])),
+    };
+    let pg = pool.get().await.map_err(|e| e.to_string())?;
+
+    // Supporta sia "Nome#TAG" che solo "Nome" (senza #)
+    let (name_q, tag_q) = if q.contains('#') {
+        let parts: Vec<&str> = q.splitn(2, '#').collect();
+        (parts[0].to_string(), Some(parts[1].to_string()))
+    } else {
+        (q.clone(), None)
+    };
+
+    let rows = if let Some(tag) = tag_q {
+        // Ricerca precisa nome + tag parziale
+        pg.query(
+            "SELECT game_name, tag_line, profile, ranked_entries \
+             FROM summoner_cache \
+             WHERE LOWER(game_name) ILIKE $1 AND LOWER(tag_line) ILIKE $2 \
+             ORDER BY cached_at DESC LIMIT 6",
+            &[
+                &format!("{}%", name_q.to_lowercase()),
+                &format!("{}%", tag.to_lowercase()),
+            ],
+        ).await.unwrap_or_default()
+    } else {
+        // Ricerca solo per nome (prefisso o contenuto)
+        pg.query(
+            "SELECT game_name, tag_line, profile, ranked_entries \
+             FROM summoner_cache \
+             WHERE LOWER(game_name) ILIKE $1 \
+             ORDER BY cached_at DESC LIMIT 6",
+            &[&format!("%{}%", name_q.to_lowercase())],
+        ).await.unwrap_or_default()
+    };
+
+    let suggestions: Vec<Value> = rows.iter().map(|row: &tokio_postgres::Row| {
+        let game_name: String = row.get(0);
+        let tag_line:  String = row.get(1);
+        let profile:   Value  = row.get::<_, serde_json::Value>(2);
+        let ranked:    Value  = row.get::<_, serde_json::Value>(3);
+
+        let profile_icon_id = profile["profileIconId"].as_i64();
+        let summoner_level  = profile["summonerLevel"].as_i64();
+
+        // Estrai SoloQ rank
+        let solo = ranked.as_array()
+            .and_then(|a| a.iter().find(|e| e["queueType"].as_str() == Some("RANKED_SOLO_5x5")));
+        let tier = solo.and_then(|e| e["tier"].as_str()).unwrap_or("").to_string();
+        let rank = solo.and_then(|e| e["rank"].as_str()
+            .or_else(|| e["division"].as_str())).unwrap_or("").to_string();
+        let lp   = solo.and_then(|e| e["leaguePoints"].as_i64()).unwrap_or(0);
+
+        json!({
+            "name": game_name,
+            "tag":  tag_line,
+            "profileIconId": profile_icon_id,
+            "summonerLevel": summoner_level,
+            "tier": tier,
+            "rank": rank,
+            "lp":   lp,
+        })
+    }).collect();
+
+    Ok(json!(suggestions))
+}
+
 fn main() {
 
     tauri::Builder::default()
@@ -1761,7 +2140,8 @@ fn main() {
             get_profiles, get_more_matches, search_summoner, get_opgg_data,
             get_champ_select_session, auto_import_build, list_opgg_tools,
             debug_champ_select_slot, get_tier_list, get_opgg_matches, get_rlp_matches,
-            get_live_game, check_live_game, get_summoner_masteries, get_match_timeline
+            get_live_game, check_live_game, get_summoner_masteries, get_match_timeline,
+            search_summoner_suggestions
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
