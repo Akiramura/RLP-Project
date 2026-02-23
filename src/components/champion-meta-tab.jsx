@@ -221,8 +221,8 @@ const META_DATA = {
 const TIER_COLOR = {
     "S+": "text-yellow-300", "S": "text-yellow-400", "S-": "text-yellow-500",
     "A+": "text-green-400", "A": "text-green-500", "A-": "text-green-600",
-    "B+": "text-blue-300", "B": "text-blue-400", "B-": "text-blue-500",
-    "C+": "text-slate-300", "C": "text-slate-400", "C-": "text-slate-500",
+    "B+": "text-[#7dd8ff]", "B": "text-[#4fc3f7]", "B-": "text-blue-500",
+    "C+": "text-[#8ab0cc]", "C": "text-[#5a8ab0]", "C-": "text-[#3a6080]",
     "D+": "text-red-400", "D": "text-red-500", "D-": "text-red-600",
 };
 
@@ -256,8 +256,8 @@ export function ChampionMetaTab({ matches, seasonFetchDone, metaData, myPuuid, m
     if (!matches || matches.length === 0) {
         return (
             <div className="flex items-center justify-center h-64 flex-col gap-3">
-                <p className="text-slate-400">Nessun match caricato.</p>
-                <p className="text-slate-600 text-xs">Vai su Match History e carica qualche partita.</p>
+                <p className="text-[#5a8ab0]">Nessun match caricato.</p>
+                <p className="text-[#2a5070] text-xs">Vai su Match History e carica qualche partita.</p>
             </div>
         );
     }
@@ -273,17 +273,17 @@ export function ChampionMetaTab({ matches, seasonFetchDone, metaData, myPuuid, m
                         <button
                             key={opt.key}
                             onClick={() => setFilterKey(opt.key)}
-                            className={`px-3 py-1 rounded-full text-xs font-semibold transition-colors ${filterKey === opt.key ? "bg-blue-600 text-white" : "bg-slate-800 text-slate-400 hover:bg-slate-700"}`}
+                            className={`px-3 py-1 rounded-full text-xs font-semibold transition-colors ${filterKey === opt.key ? "bg-[#1e6fff] text-white" : "bg-[#0d1f38] text-[#5a8ab0] hover:bg-[#142545]"}`}
                         >
                             {opt.label}
                         </button>
                     ))}
                 </div>
                 <div className="flex items-center justify-center h-48 flex-col gap-3">
-                    <p className="text-slate-400">Nessuna partita nel periodo selezionato.</p>
+                    <p className="text-[#5a8ab0]">Nessuna partita nel periodo selezionato.</p>
                     <button
                         onClick={() => setFilterKey("all")}
-                        className="text-blue-400 text-xs underline hover:text-blue-300"
+                        className="text-[#4fc3f7] text-xs underline hover:text-[#7dd8ff]"
                     >
                         Mostra tutte le partite
                     </button>
@@ -348,8 +348,8 @@ export function ChampionMetaTab({ matches, seasonFetchDone, metaData, myPuuid, m
 
             {/* Banner caricamento season in corso */}
             {!seasonFetchDone && (
-                <div className="flex items-center gap-3 px-4 py-2.5 bg-blue-950/60 border border-blue-800 rounded-lg text-sm text-blue-300">
-                    <svg className="animate-spin w-4 h-4 text-blue-400 shrink-0" fill="none" viewBox="0 0 24 24">
+                <div className="flex items-center gap-3 px-4 py-2.5 bg-[#0a1228]/70 border border-[#1a3558] rounded-lg text-sm text-[#7dd8ff]">
+                    <svg className="animate-spin w-4 h-4 text-[#4fc3f7] shrink-0" fill="none" viewBox="0 0 24 24">
                         <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                         <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
                     </svg>
@@ -363,21 +363,21 @@ export function ChampionMetaTab({ matches, seasonFetchDone, metaData, myPuuid, m
                 <h2 className="text-xl font-bold text-white">Le tue statistiche</h2>
                 <div className="flex items-center gap-3">
                     {/* Dropdown periodo */}
-                    <div className="flex items-center gap-2 bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5">
-                        <Filter className="w-3.5 h-3.5 text-slate-400" />
+                    <div className="flex items-center gap-2 bg-[#070f1e] border border-[#1a3558] rounded-lg px-3 py-1.5">
+                        <Filter className="w-3.5 h-3.5 text-[#5a8ab0]" />
                         <select
                             value={filterKey}
                             onChange={e => setFilterKey(e.target.value)}
-                            className="bg-transparent text-slate-200 text-sm focus:outline-none cursor-pointer"
+                            className="bg-transparent text-[#b8d4e8] text-sm focus:outline-none cursor-pointer"
                         >
                             {FILTER_OPTIONS.map(o => (
-                                <option key={o.key} value={o.key} className="bg-slate-800">
+                                <option key={o.key} value={o.key} className="bg-[#0d1f38]">
                                     {o.label}
                                 </option>
                             ))}
                         </select>
                     </div>
-                    <Badge className="bg-slate-700 text-slate-300 text-xs">
+                    <Badge className="bg-[#142545] text-[#8ab0cc] text-xs">
                         {totalGames} partite
                     </Badge>
                 </div>
@@ -385,41 +385,41 @@ export function ChampionMetaTab({ matches, seasonFetchDone, metaData, myPuuid, m
 
             {/* Avviso se filtro azzera i match */}
             {totalGames === 0 && (
-                <div className="p-4 bg-slate-800 border border-slate-700 rounded-lg text-center">
-                    <p className="text-slate-400 text-sm">Nessuna partita trovata per <span className="text-white font-semibold">{activeLabel}</span>.</p>
-                    <p className="text-slate-500 text-xs mt-1">Prova a caricare più partite o seleziona un periodo diverso.</p>
+                <div className="p-4 bg-[#0d1f38] border border-[#1a3558] rounded-lg text-center">
+                    <p className="text-[#5a8ab0] text-sm">Nessuna partita trovata per <span className="text-white font-semibold">{activeLabel}</span>.</p>
+                    <p className="text-[#3a6080] text-xs mt-1">Prova a caricare più partite o seleziona un periodo diverso.</p>
                 </div>
             )}
 
             {totalGames > 0 && (<>
 
                 {/* Statistiche globali */}
-                <Card className="p-6 bg-slate-900 border-slate-700">
+                <Card className="p-6 bg-[#070f1e] border-[#1a3558]">
                     <h3 className="text-lg font-bold text-white mb-4 flex items-center gap-2">
                         <Trophy className="w-5 h-5 text-yellow-400" />
                         Performance Generale
-                        <span className="text-slate-500 text-xs font-normal ml-1">— {activeLabel}</span>
+                        <span className="text-[#3a6080] text-xs font-normal ml-1">— {activeLabel}</span>
                     </h3>
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                        <div className="bg-slate-800 rounded-lg p-4 text-center">
+                        <div className="bg-[#0d1f38] rounded-lg p-4 text-center">
                             <p className={`text-2xl font-bold ${parseFloat(globalWR) >= 50 ? "text-green-400" : "text-red-400"}`}>{globalWR}%</p>
-                            <p className="text-slate-400 text-xs mt-1">Win Rate</p>
-                            <p className="text-slate-500 text-xs">{totalWins}V {totalGames - totalWins}S</p>
+                            <p className="text-[#5a8ab0] text-xs mt-1">Win Rate</p>
+                            <p className="text-[#3a6080] text-xs">{totalWins}V {totalGames - totalWins}S</p>
                         </div>
-                        <div className="bg-slate-800 rounded-lg p-4 text-center">
-                            <p className="text-2xl font-bold text-blue-400">{globalKDA}</p>
-                            <p className="text-slate-400 text-xs mt-1">KDA Ratio</p>
-                            <p className="text-slate-500 text-xs">{(totalKills / totalGames).toFixed(1)} / {(totalDeaths / totalGames).toFixed(1)} / {(totalAssists / totalGames).toFixed(1)}</p>
+                        <div className="bg-[#0d1f38] rounded-lg p-4 text-center">
+                            <p className="text-2xl font-bold text-[#4fc3f7]">{globalKDA}</p>
+                            <p className="text-[#5a8ab0] text-xs mt-1">KDA Ratio</p>
+                            <p className="text-[#3a6080] text-xs">{(totalKills / totalGames).toFixed(1)} / {(totalDeaths / totalGames).toFixed(1)} / {(totalAssists / totalGames).toFixed(1)}</p>
                         </div>
-                        <div className="bg-slate-800 rounded-lg p-4 text-center">
+                        <div className="bg-[#0d1f38] rounded-lg p-4 text-center">
                             <p className="text-2xl font-bold text-white">{avgCs}</p>
-                            <p className="text-slate-400 text-xs mt-1">Avg CS</p>
-                            <p className="text-slate-500 text-xs">per partita</p>
+                            <p className="text-[#5a8ab0] text-xs mt-1">Avg CS</p>
+                            <p className="text-[#3a6080] text-xs">per partita</p>
                         </div>
-                        <div className="bg-slate-800 rounded-lg p-4 text-center">
+                        <div className="bg-[#0d1f38] rounded-lg p-4 text-center">
                             <p className="text-2xl font-bold text-yellow-400">{parseInt(avgGold).toLocaleString()}</p>
-                            <p className="text-slate-400 text-xs mt-1">Avg Gold</p>
-                            <p className="text-slate-500 text-xs">per partita</p>
+                            <p className="text-[#5a8ab0] text-xs mt-1">Avg Gold</p>
+                            <p className="text-[#3a6080] text-xs">per partita</p>
                         </div>
                     </div>
                 </Card>
@@ -428,19 +428,19 @@ export function ChampionMetaTab({ matches, seasonFetchDone, metaData, myPuuid, m
                 {(overPerformers.length > 0 || underPerformers.length > 0) && (
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         {overPerformers.length > 0 && (
-                            <Card className="p-4 bg-slate-900 border-green-800">
+                            <Card className="p-4 bg-[#070f1e] border-green-800">
                                 <div className="flex items-center gap-2 mb-3">
                                     <Zap className="w-4 h-4 text-green-400" />
                                     <h4 className="text-sm font-bold text-green-400">📊 Stai overperformando su:</h4>
-                                    <span className="text-slate-500 text-xs ml-auto">vs meta WR</span>
+                                    <span className="text-[#3a6080] text-xs ml-auto">vs meta WR</span>
                                 </div>
                                 <div className="space-y-2">
                                     {overPerformers.map(c => (
-                                        <div key={c.name} className="flex items-center gap-3 bg-slate-800 rounded-lg px-3 py-2">
-                                            <img src={`https://ddragon.leagueoflegends.com/cdn/${PATCH}/img/champion/${c.name}.png`} alt={c.name} className="w-8 h-8 rounded-md object-cover bg-slate-700" onError={e => { e.target.style.display = "none"; }} />
+                                        <div key={c.name} className="flex items-center gap-3 bg-[#0d1f38] rounded-lg px-3 py-2">
+                                            <img src={`https://ddragon.leagueoflegends.com/cdn/${PATCH}/img/champion/${c.name}.png`} alt={c.name} className="w-8 h-8 rounded-md object-cover bg-[#142545]" onError={e => { e.target.style.display = "none"; }} />
                                             <div className="flex-1">
                                                 <p className="text-white text-sm font-semibold">{c.name}</p>
-                                                <p className="text-slate-500 text-xs">{c.games} partite{c.meta && <> • Meta: <span className={TIER_COLOR[c.meta.tier] || "text-slate-300"}>{c.meta.tier}</span> {c.meta.metaWR}%</>}</p>
+                                                <p className="text-[#3a6080] text-xs">{c.games} partite{c.meta && <> • Meta: <span className={TIER_COLOR[c.meta.tier] || "text-[#8ab0cc]"}>{c.meta.tier}</span> {c.meta.metaWR}%</>}</p>
                                             </div>
                                             <div className="text-right">
                                                 <p className="text-green-400 font-bold text-sm">{c.winRate}% WR</p>
@@ -452,19 +452,19 @@ export function ChampionMetaTab({ matches, seasonFetchDone, metaData, myPuuid, m
                             </Card>
                         )}
                         {underPerformers.length > 0 && (
-                            <Card className="p-4 bg-slate-900 border-red-900">
+                            <Card className="p-4 bg-[#070f1e] border-red-900">
                                 <div className="flex items-center gap-2 mb-3">
                                     <AlertTriangle className="w-4 h-4 text-red-400" />
                                     <h4 className="text-sm font-bold text-red-400">⚠️ Underperforming su meta picks:</h4>
-                                    <span className="text-slate-500 text-xs ml-auto">vs meta WR</span>
+                                    <span className="text-[#3a6080] text-xs ml-auto">vs meta WR</span>
                                 </div>
                                 <div className="space-y-2">
                                     {underPerformers.map(c => (
-                                        <div key={c.name} className="flex items-center gap-3 bg-slate-800 rounded-lg px-3 py-2">
-                                            <img src={`https://ddragon.leagueoflegends.com/cdn/${PATCH}/img/champion/${c.name}.png`} alt={c.name} className="w-8 h-8 rounded-md object-cover bg-slate-700" onError={e => { e.target.style.display = "none"; }} />
+                                        <div key={c.name} className="flex items-center gap-3 bg-[#0d1f38] rounded-lg px-3 py-2">
+                                            <img src={`https://ddragon.leagueoflegends.com/cdn/${PATCH}/img/champion/${c.name}.png`} alt={c.name} className="w-8 h-8 rounded-md object-cover bg-[#142545]" onError={e => { e.target.style.display = "none"; }} />
                                             <div className="flex-1">
                                                 <p className="text-white text-sm font-semibold">{c.name}</p>
-                                                <p className="text-slate-500 text-xs">{c.games} partite{c.meta && <> • Meta: <span className={TIER_COLOR[c.meta.tier] || "text-slate-300"}>{c.meta.tier}</span> {c.meta.metaWR}%</>}</p>
+                                                <p className="text-[#3a6080] text-xs">{c.games} partite{c.meta && <> • Meta: <span className={TIER_COLOR[c.meta.tier] || "text-[#8ab0cc]"}>{c.meta.tier}</span> {c.meta.metaWR}%</>}</p>
                                             </div>
                                             <div className="text-right">
                                                 <p className="text-red-400 font-bold text-sm">{c.winRate}% WR</p>
@@ -479,56 +479,56 @@ export function ChampionMetaTab({ matches, seasonFetchDone, metaData, myPuuid, m
                 )}
 
                 {/* Champion breakdown */}
-                <Card className="p-6 bg-slate-900 border-slate-700">
+                <Card className="p-6 bg-[#070f1e] border-[#1a3558]">
                     <h3 className="text-lg font-bold text-white mb-4 flex items-center gap-2">
-                        <Swords className="w-5 h-5 text-blue-400" />
+                        <Swords className="w-5 h-5 text-[#4fc3f7]" />
                         Champion Breakdown
                     </h3>
                     <div className="grid grid-cols-[2fr_1fr_1fr_1fr_1fr_1fr] gap-2 px-3 mb-2">
-                        <p className="text-slate-500 text-xs">Campione</p>
-                        <p className="text-slate-500 text-xs text-center">Partite</p>
-                        <p className="text-slate-500 text-xs text-center">Win Rate</p>
-                        <p className="text-slate-500 text-xs text-center">vs Meta</p>
-                        <p className="text-slate-500 text-xs text-center">KDA</p>
-                        <p className="text-slate-500 text-xs text-center">Avg CS</p>
+                        <p className="text-[#3a6080] text-xs">Campione</p>
+                        <p className="text-[#3a6080] text-xs text-center">Partite</p>
+                        <p className="text-[#3a6080] text-xs text-center">Win Rate</p>
+                        <p className="text-[#3a6080] text-xs text-center">vs Meta</p>
+                        <p className="text-[#3a6080] text-xs text-center">KDA</p>
+                        <p className="text-[#3a6080] text-xs text-center">Avg CS</p>
                     </div>
                     <div className="space-y-2">
                         {champList.map((champ, i) => {
                             const wrNum = parseFloat(champ.winRate);
                             const kdaNum = champ.kda === "Perfect" ? 99 : parseFloat(champ.kda);
                             return (
-                                <div key={champ.name} className="grid grid-cols-[2fr_1fr_1fr_1fr_1fr_1fr] gap-2 items-center bg-slate-800 rounded-lg px-3 py-2 hover:bg-slate-750 transition-colors">
+                                <div key={champ.name} className="grid grid-cols-[2fr_1fr_1fr_1fr_1fr_1fr] gap-2 items-center bg-[#0d1f38] rounded-lg px-3 py-2 hover:bg-[#0f2545] transition-colors">
                                     <div className="flex items-center gap-3">
-                                        <span className="text-slate-600 text-xs w-4">{i + 1}</span>
-                                        <img src={`https://ddragon.leagueoflegends.com/cdn/${PATCH}/img/champion/${champ.name}.png`} alt={champ.name} className="w-9 h-9 rounded-md object-cover bg-slate-700" onError={e => { e.target.style.display = "none"; }} />
+                                        <span className="text-[#2a5070] text-xs w-4">{i + 1}</span>
+                                        <img src={`https://ddragon.leagueoflegends.com/cdn/${PATCH}/img/champion/${champ.name}.png`} alt={champ.name} className="w-9 h-9 rounded-md object-cover bg-[#142545]" onError={e => { e.target.style.display = "none"; }} />
                                         <div>
                                             <div className="flex items-center gap-1">
                                                 <p className="text-white text-sm font-semibold">{champ.name}</p>
-                                                {champ.meta && <span className={`text-xs font-bold ${TIER_COLOR[champ.meta.tier] || "text-slate-400"}`}>{champ.meta.tier}</span>}
+                                                {champ.meta && <span className={`text-xs font-bold ${TIER_COLOR[champ.meta.tier] || "text-[#5a8ab0]"}`}>{champ.meta.tier}</span>}
                                             </div>
-                                            <p className="text-slate-500 text-xs">{champ.wins}V {champ.losses}S</p>
+                                            <p className="text-[#3a6080] text-xs">{champ.wins}V {champ.losses}S</p>
                                         </div>
                                     </div>
-                                    <p className="text-slate-300 text-sm text-center">{champ.games}</p>
+                                    <p className="text-[#8ab0cc] text-sm text-center">{champ.games}</p>
                                     <div className="text-center">
                                         <p className={`text-sm font-bold ${wrNum >= 60 ? "text-green-400" : wrNum >= 50 ? "text-green-300" : wrNum >= 40 ? "text-red-300" : "text-red-400"}`}>{champ.winRate}%</p>
-                                        <div className="w-full bg-slate-700 rounded-full h-1 mt-1">
+                                        <div className="w-full bg-[#142545] rounded-full h-1 mt-1">
                                             <div className={`h-1 rounded-full ${wrNum >= 50 ? "bg-green-500" : "bg-red-500"}`} style={{ width: `${Math.min(wrNum, 100)}%` }} />
                                         </div>
                                     </div>
                                     <div className="text-center">
                                         {champ.meta ? (
                                             <>
-                                                <p className={`text-xs font-bold ${champ.diff >= 3 ? "text-green-400" : champ.diff <= -3 ? "text-red-400" : "text-slate-400"}`}>{champ.diff > 0 ? "+" : ""}{champ.diff}%</p>
-                                                <p className="text-slate-600 text-xs">{champ.meta.metaWR}% meta</p>
+                                                <p className={`text-xs font-bold ${champ.diff >= 3 ? "text-green-400" : champ.diff <= -3 ? "text-red-400" : "text-[#5a8ab0]"}`}>{champ.diff > 0 ? "+" : ""}{champ.diff}%</p>
+                                                <p className="text-[#2a5070] text-xs">{champ.meta.metaWR}% meta</p>
                                             </>
-                                        ) : <p className="text-slate-600 text-xs">—</p>}
+                                        ) : <p className="text-[#2a5070] text-xs">—</p>}
                                     </div>
-                                    <p className={`text-sm font-bold text-center ${kdaNum >= 3 ? "text-blue-400" : kdaNum >= 2 ? "text-slate-300" : "text-slate-500"}`}>
+                                    <p className={`text-sm font-bold text-center ${kdaNum >= 3 ? "text-[#4fc3f7]" : kdaNum >= 2 ? "text-[#8ab0cc]" : "text-[#3a6080]"}`}>
                                         {champ.kda}
-                                        <span className="block text-xs font-normal text-slate-500">{champ.avgKills}/{champ.avgDeaths}/{champ.avgAssists}</span>
+                                        <span className="block text-xs font-normal text-[#3a6080]">{champ.avgKills}/{champ.avgDeaths}/{champ.avgAssists}</span>
                                     </p>
-                                    <p className="text-slate-300 text-sm text-center">{champ.avgCs}</p>
+                                    <p className="text-[#8ab0cc] text-sm text-center">{champ.avgCs}</p>
                                 </div>
                             );
                         })}
@@ -542,18 +542,18 @@ export function ChampionMetaTab({ matches, seasonFetchDone, metaData, myPuuid, m
                             const best = [...champList].filter(c => c.games >= 2).sort((a, b) => parseFloat(b.winRate) - parseFloat(a.winRate))[0];
                             if (!best) return null;
                             return (
-                                <Card className="p-4 bg-slate-900 border-green-900">
+                                <Card className="p-4 bg-[#070f1e] border-green-900">
                                     <div className="flex items-center gap-2 mb-3">
                                         <TrendingUp className="w-4 h-4 text-green-400" />
                                         <h4 className="text-sm font-bold text-green-400">Miglior Win Rate</h4>
-                                        <span className="text-slate-500 text-xs ml-auto">min. 2 partite</span>
+                                        <span className="text-[#3a6080] text-xs ml-auto">min. 2 partite</span>
                                     </div>
                                     <div className="flex items-center gap-3">
                                         <img src={`https://ddragon.leagueoflegends.com/cdn/${PATCH}/img/champion/${best.name}.png`} alt={best.name} className="w-12 h-12 rounded-lg object-cover" onError={e => { e.target.style.display = "none"; }} />
                                         <div>
                                             <p className="text-white font-bold">{best.name}</p>
                                             <p className="text-green-400 text-lg font-bold">{best.winRate}% WR</p>
-                                            <p className="text-slate-400 text-xs">{best.games} partite • {best.kda} KDA</p>
+                                            <p className="text-[#5a8ab0] text-xs">{best.games} partite • {best.kda} KDA</p>
                                         </div>
                                     </div>
                                 </Card>
@@ -563,18 +563,18 @@ export function ChampionMetaTab({ matches, seasonFetchDone, metaData, myPuuid, m
                             const best = [...champList].filter(c => c.games >= 2 && c.kda !== "Perfect").sort((a, b) => parseFloat(b.kda) - parseFloat(a.kda))[0];
                             if (!best) return null;
                             return (
-                                <Card className="p-4 bg-slate-900 border-blue-900">
+                                <Card className="p-4 bg-[#070f1e] border-[#0a1e4a]">
                                     <div className="flex items-center gap-2 mb-3">
-                                        <Target className="w-4 h-4 text-blue-400" />
-                                        <h4 className="text-sm font-bold text-blue-400">Miglior KDA</h4>
-                                        <span className="text-slate-500 text-xs ml-auto">min. 2 partite</span>
+                                        <Target className="w-4 h-4 text-[#4fc3f7]" />
+                                        <h4 className="text-sm font-bold text-[#4fc3f7]">Miglior KDA</h4>
+                                        <span className="text-[#3a6080] text-xs ml-auto">min. 2 partite</span>
                                     </div>
                                     <div className="flex items-center gap-3">
                                         <img src={`https://ddragon.leagueoflegends.com/cdn/${PATCH}/img/champion/${best.name}.png`} alt={best.name} className="w-12 h-12 rounded-lg object-cover" onError={e => { e.target.style.display = "none"; }} />
                                         <div>
                                             <p className="text-white font-bold">{best.name}</p>
-                                            <p className="text-blue-400 text-lg font-bold">{best.kda} KDA</p>
-                                            <p className="text-slate-400 text-xs">{best.games} partite • {best.winRate}% WR</p>
+                                            <p className="text-[#4fc3f7] text-lg font-bold">{best.kda} KDA</p>
+                                            <p className="text-[#5a8ab0] text-xs">{best.games} partite • {best.winRate}% WR</p>
                                         </div>
                                     </div>
                                 </Card>
@@ -583,7 +583,7 @@ export function ChampionMetaTab({ matches, seasonFetchDone, metaData, myPuuid, m
                     </div>
                 )}
 
-                <p className="text-center text-slate-600 text-xs pb-4">
+                <p className="text-center text-[#2a5070] text-xs pb-4">
                     Meta data: {metaData && Object.keys(metaData).length > 0 ? "OP.GG Live" : "Lolalytics (statico)"} Emerald+ ({Object.keys(activeMetaData).length} campioni) • {activeLabel} • {totalGames} partite
                 </p>
 

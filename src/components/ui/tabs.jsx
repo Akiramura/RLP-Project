@@ -20,7 +20,7 @@ export function Tabs({ defaultValue, value, onValueChange, children, className =
 }
 
 export function TabsList({ children, className = "" }) {
-    return <div className={className}>{children}</div>;
+    return <div className={`flex flex-wrap gap-1 ${className}`}>{children}</div>;
 }
 
 export function TabsTrigger({ value, children, className = "" }) {
@@ -30,7 +30,10 @@ export function TabsTrigger({ value, children, className = "" }) {
     return (
         <button
             onClick={() => setActiveTab(value)}
-            className={`${className} px-4 py-2 rounded ${isActive ? "bg-blue-600 text-white" : "bg-slate-800 text-slate-300"
+            className={`${className} flex items-center px-4 py-2 rounded text-sm font-medium transition-all relative
+                ${isActive
+                    ? "bg-[#1e6fff] text-white shadow-[0_0_12px_rgba(79,195,247,0.3)]"
+                    : "bg-[#0d1f38] text-[#5a8ab0] hover:text-white hover:bg-[#142545]"
                 }`}
         >
             {children}

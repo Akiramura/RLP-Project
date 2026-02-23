@@ -71,12 +71,12 @@ const TIER_STYLE = {
     "A+": { bg: "bg-green-500/15", border: "border-green-500/30", text: "text-green-400" },
     "A": { bg: "bg-green-500/10", border: "border-green-500/20", text: "text-green-500" },
     "A-": { bg: "bg-green-500/8", border: "border-green-500/15", text: "text-green-600" },
-    "B+": { bg: "bg-blue-500/15", border: "border-blue-500/30", text: "text-blue-300" },
-    "B": { bg: "bg-blue-500/10", border: "border-blue-500/20", text: "text-blue-400" },
-    "B-": { bg: "bg-blue-500/8", border: "border-blue-500/15", text: "text-blue-500" },
-    "C+": { bg: "bg-slate-500/15", border: "border-slate-500/30", text: "text-slate-300" },
-    "C": { bg: "bg-slate-500/10", border: "border-slate-500/20", text: "text-slate-400" },
-    "C-": { bg: "bg-slate-500/8", border: "border-slate-500/15", text: "text-slate-500" },
+    "B+": { bg: "bg-[#2278ff]/15", border: "border-blue-500/30", text: "text-[#7dd8ff]" },
+    "B": { bg: "bg-[#2278ff]/10", border: "border-blue-500/20", text: "text-[#4fc3f7]" },
+    "B-": { bg: "bg-[#2278ff]/8", border: "border-blue-500/15", text: "text-blue-500" },
+    "C+": { bg: "bg-[#3a6080]/15", border: "border-[#3a6080]/30", text: "text-[#8ab0cc]" },
+    "C": { bg: "bg-[#3a6080]/10", border: "border-[#3a6080]/20", text: "text-[#5a8ab0]" },
+    "C-": { bg: "bg-[#3a6080]/8", border: "border-[#3a6080]/15", text: "text-[#3a6080]" },
     "D+": { bg: "bg-red-500/15", border: "border-red-500/30", text: "text-red-400" },
     "D": { bg: "bg-red-500/10", border: "border-red-500/20", text: "text-red-500" },
     "D-": { bg: "bg-red-500/8", border: "border-red-500/15", text: "text-red-600" },
@@ -361,7 +361,7 @@ export function MetaTab({ onMetaDataReady }) {
             <div className="flex items-center justify-between flex-wrap gap-3">
                 <div>
                     <h2 className="text-xl font-bold text-white">Champion Tier List</h2>
-                    <p className="text-slate-400 text-xs mt-0.5">
+                    <p className="text-[#5a8ab0] text-xs mt-0.5">
                         OP.GG EUW • Emerald+ •{" "}
                         {lastUpdated
                             ? `Aggiornato alle ${lastUpdated.toLocaleTimeString("it-IT")}`
@@ -370,13 +370,13 @@ export function MetaTab({ onMetaDataReady }) {
                     </p>
                 </div>
                 <div className="flex items-center gap-2">
-                    <Badge className="bg-slate-800 text-slate-300 border border-slate-700 text-xs">
+                    <Badge className="bg-[#0d1f38] text-[#8ab0cc] border border-[#1a3558] text-xs">
                         {filtered.length} campioni
                     </Badge>
                     <button
                         onClick={loadData}
                         disabled={loading}
-                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-300 hover:bg-slate-700 text-xs transition-all disabled:opacity-50"
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#0d1f38] border border-[#1a3558] text-[#8ab0cc] hover:bg-[#142545] text-xs transition-all disabled:opacity-50"
                     >
                         <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
                         Aggiorna
@@ -387,8 +387,8 @@ export function MetaTab({ onMetaDataReady }) {
             {/* Loading */}
             {loading && champions.length === 0 && (
                 <div className="flex items-center justify-center h-48 gap-3">
-                    <Loader2 className="w-6 h-6 text-blue-400 animate-spin" />
-                    <p className="text-slate-400">Caricamento dati...</p>
+                    <Loader2 className="w-6 h-6 text-[#4fc3f7] animate-spin" />
+                    <p className="text-[#5a8ab0]">Caricamento dati...</p>
                 </div>
             )}
 
@@ -409,14 +409,14 @@ export function MetaTab({ onMetaDataReady }) {
             {/* Filtri */}
             {champions.length > 0 && (
                 <div className="flex flex-col sm:flex-row gap-3">
-                    <div className="flex gap-1 bg-slate-900 border border-slate-800 rounded-lg p-1 flex-wrap">
+                    <div className="flex gap-1 bg-[#070f1e] border border-[#0f2040] rounded-lg p-1 flex-wrap">
                         {LANES.map(l => (
                             <button
                                 key={l.key}
                                 onClick={() => setLane(l.key)}
                                 className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all flex items-center gap-1.5 ${lane === l.key
-                                    ? "bg-blue-600 text-white shadow"
-                                    : "text-slate-400 hover:text-white hover:bg-slate-800"
+                                    ? "bg-[#1e6fff] text-white shadow"
+                                    : "text-[#5a8ab0] hover:text-white hover:bg-[#0d1f38]"
                                     }`}
                             >
                                 <span>{l.icon}</span>
@@ -425,13 +425,13 @@ export function MetaTab({ onMetaDataReady }) {
                         ))}
                     </div>
                     <div className="relative flex-1 min-w-[180px]">
-                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[#5a8ab0]" />
                         <input
                             type="text"
                             placeholder="Cerca campione..."
                             value={search}
                             onChange={e => setSearch(e.target.value)}
-                            className="w-full pl-9 pr-4 py-2 bg-slate-900 border border-slate-800 rounded-lg text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-blue-600"
+                            className="w-full pl-9 pr-4 py-2 bg-[#070f1e] border border-[#0f2040] rounded-lg text-sm text-white placeholder:text-[#3a6080] focus:outline-none focus:border-[#1e6fff]"
                         />
                     </div>
                 </div>
@@ -441,7 +441,7 @@ export function MetaTab({ onMetaDataReady }) {
             {champions.length > 0 && (
                 <div className="space-y-3">
                     {grouped.length === 0 && (
-                        <div className="text-center py-16 text-slate-500">Nessun campione trovato.</div>
+                        <div className="text-center py-16 text-[#3a6080]">Nessun campione trovato.</div>
                     )}
                     {grouped.map(({ tier, champs }) => {
                         const style = TIER_STYLE[tier] || TIER_STYLE["C"];
@@ -450,31 +450,31 @@ export function MetaTab({ onMetaDataReady }) {
                                 <div className={`${style.bg} px-4 py-2 flex items-center gap-3`}>
                                     <span className={`text-2xl font-black w-10 text-center ${style.text}`}>{tier}</span>
                                     <div className="h-px flex-1 bg-white/5" />
-                                    <span className="text-slate-500 text-xs">{champs.length} campioni</span>
+                                    <span className="text-[#3a6080] text-xs">{champs.length} campioni</span>
                                 </div>
-                                <div className="p-3 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-2 bg-slate-900/60">
+                                <div className="p-3 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-2 bg-[#070f1e]/60">
                                     {champs.map(c => (
                                         <div
                                             key={`${c.name}-${c.lane}`}
-                                            className="flex flex-col items-center gap-1.5 bg-slate-800/60 hover:bg-slate-800 rounded-lg p-2 cursor-pointer transition-all group border border-transparent hover:border-slate-700"
+                                            className="flex flex-col items-center gap-1.5 bg-[#0d1f38]/60 hover:bg-[#0d1f38] rounded-lg p-2 cursor-pointer transition-all group border border-transparent hover:border-[#1a3558]"
                                         >
                                             <div className="relative">
                                                 <img
                                                     src={`https://ddragon.leagueoflegends.com/cdn/${PATCH}/img/champion/${c.name}.png`}
                                                     alt={c.rawName}
-                                                    className="w-12 h-12 rounded-lg object-cover bg-slate-700 group-hover:scale-105 transition-transform"
+                                                    className="w-12 h-12 rounded-lg object-cover bg-[#142545] group-hover:scale-105 transition-transform"
                                                     onError={e => { e.target.src = ""; e.target.style.display = "none"; }}
                                                 />
-                                                <span className="absolute -bottom-1 -right-1 text-xs bg-slate-900 rounded px-0.5 border border-slate-700">
+                                                <span className="absolute -bottom-1 -right-1 text-xs bg-[#070f1e] rounded px-0.5 border border-[#1a3558]">
                                                     {LANES.find(l => l.key === c.lane)?.icon}
                                                 </span>
                                             </div>
                                             <p className="text-white text-xs font-semibold text-center leading-tight">{c.rawName}</p>
                                             <div className="flex flex-col items-center gap-0.5 w-full">
-                                                <span className={`text-xs font-bold ${c.metaWR >= 52 ? "text-green-400" : c.metaWR >= 50 ? "text-slate-300" : "text-red-400"}`}>
+                                                <span className={`text-xs font-bold ${c.metaWR >= 52 ? "text-green-400" : c.metaWR >= 50 ? "text-[#8ab0cc]" : "text-red-400"}`}>
                                                     {c.metaWR}% WR
                                                 </span>
-                                                <div className="flex gap-1 text-slate-500 text-xs">
+                                                <div className="flex gap-1 text-[#3a6080] text-xs">
                                                     <span title="Pick rate">P:{c.pick}%</span>
                                                 </div>
                                             </div>
@@ -487,7 +487,7 @@ export function MetaTab({ onMetaDataReady }) {
                 </div>
             )}
 
-            <p className="text-center text-slate-600 text-xs pb-4">
+            <p className="text-center text-[#2a5070] text-xs pb-4">
                 Dati: EUW Emerald+ • {lastUpdated?.toLocaleDateString("it-IT") || "—"}
             </p>
         </div>

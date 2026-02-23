@@ -98,7 +98,7 @@ export function ProfileTab({ profile, rankedSolo, rankedFlex, matches, myPuuid, 
     return (
         <div className="space-y-6">
             {/* Summoner Info */}
-            <Card className="p-6 bg-gradient-to-br from-slate-900 to-slate-800 border-blue-900">
+            <Card className="p-6 bg-gradient-to-br from-[#070f1e] to-[#0d1f38] border-[#0a1e4a]">
                 <div className="flex items-start gap-6">
                     {/* Sostituisci il div con le iniziali con questo */}
                     <div className="relative">
@@ -117,7 +117,7 @@ export function ProfileTab({ profile, rankedSolo, rankedFlex, matches, myPuuid, 
                         >
                             {initials}
                         </div>
-                        <div className="absolute -bottom-2 -right-2 bg-blue-600 text-white text-xs font-bold px-2 py-1 rounded">
+                        <div className="absolute -bottom-2 -right-2 bg-[#1e6fff] text-white text-xs font-bold px-2 py-1 rounded">
                             {level}
                         </div>
                     </div>
@@ -132,13 +132,13 @@ export function ProfileTab({ profile, rankedSolo, rankedFlex, matches, myPuuid, 
                                     {rankedSolo.tier} {rankedSolo.rank}
                                 </Badge>
                             )}
-                            <span className="text-slate-400">Level {level}</span>
+                            <span className="text-[#5a8ab0]">Level {level}</span>
                             {onViewLiveGame && myPuuid && (
                                 <Button
                                     onClick={() => onViewLiveGame(myPuuid)}
                                     className={`text-white text-xs px-3 py-1 h-7 flex items-center gap-1.5 relative ${isInLiveGame
                                         ? "bg-red-600 hover:bg-red-500 shadow-lg shadow-red-900/40"
-                                        : "bg-slate-700 hover:bg-slate-600"
+                                        : "bg-[#142545] hover:bg-[#1e3560]"
                                         }`}
                                 >
                                     <Tv className="w-3 h-3" />
@@ -151,7 +151,7 @@ export function ProfileTab({ profile, rankedSolo, rankedFlex, matches, myPuuid, 
                         </div>
                         <div className="space-y-2">
                             <div className="flex justify-between text-sm">
-                                <span className="text-slate-400">XP Progress</span>
+                                <span className="text-[#5a8ab0]">XP Progress</span>
                                 <span className="text-white">{xpCurrent.toLocaleString()} / {xpTotal.toLocaleString()}</span>
                             </div>
                             <Progress value={xpPercent} className="h-2" />
@@ -162,7 +162,7 @@ export function ProfileTab({ profile, rankedSolo, rankedFlex, matches, myPuuid, 
 
             {/* Ranked Stats */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <Card className="p-6 bg-slate-900 border-blue-900">
+                <Card className="p-6 bg-[#070f1e] border-[#0a1e4a]">
                     <h3 className="text-xl font-bold text-white mb-4 flex items-center gap-2">
                         <Trophy className="w-5 h-5 text-yellow-500" />
                         Ranked Solo/Duo
@@ -170,30 +170,30 @@ export function ProfileTab({ profile, rankedSolo, rankedFlex, matches, myPuuid, 
                     {rankedSolo ? (
                         <div className="space-y-4">
                             <div className="flex justify-between items-center">
-                                <span className="text-slate-400">Rank</span>
+                                <span className="text-[#5a8ab0]">Rank</span>
                                 <Badge className={`bg-gradient-to-r ${soloColor} text-white border-0`}>
                                     {rankedSolo.tier} {rankedSolo.rank}
                                 </Badge>
                             </div>
                             <div className="flex justify-between items-center">
-                                <span className="text-slate-400">LP</span>
+                                <span className="text-[#5a8ab0]">LP</span>
                                 <span className="text-white font-bold">{rankedSolo.leaguePoints} LP</span>
                             </div>
                             <div className="flex justify-between items-center">
-                                <span className="text-slate-400">Win Rate</span>
+                                <span className="text-[#5a8ab0]">Win Rate</span>
                                 <span className="text-green-500 font-bold">{soloWR}%</span>
                             </div>
                             <div className="flex justify-between items-center">
-                                <span className="text-slate-400">Games</span>
+                                <span className="text-[#5a8ab0]">Games</span>
                                 <span className="text-white">{rankedSolo.wins} W / {rankedSolo.losses} L</span>
                             </div>
                         </div>
                     ) : (
-                        <p className="text-slate-400">Unranked</p>
+                        <p className="text-[#5a8ab0]">Unranked</p>
                     )}
                 </Card>
 
-                <Card className="p-6 bg-slate-900 border-purple-900">
+                <Card className="p-6 bg-[#070f1e] border-purple-900">
                     <h3 className="text-xl font-bold text-white mb-4 flex items-center gap-2">
                         <Trophy className="w-5 h-5 text-purple-500" />
                         Ranked Flex
@@ -201,43 +201,43 @@ export function ProfileTab({ profile, rankedSolo, rankedFlex, matches, myPuuid, 
                     {rankedFlex ? (
                         <div className="space-y-4">
                             <div className="flex justify-between items-center">
-                                <span className="text-slate-400">Rank</span>
+                                <span className="text-[#5a8ab0]">Rank</span>
                                 <Badge className={`bg-gradient-to-r ${flexColor} text-white border-0`}>
                                     {rankedFlex.tier} {rankedFlex.rank}
                                 </Badge>
                             </div>
                             <div className="flex justify-between items-center">
-                                <span className="text-slate-400">LP</span>
+                                <span className="text-[#5a8ab0]">LP</span>
                                 <span className="text-white font-bold">{rankedFlex.leaguePoints} LP</span>
                             </div>
                             <div className="flex justify-between items-center">
-                                <span className="text-slate-400">Win Rate</span>
+                                <span className="text-[#5a8ab0]">Win Rate</span>
                                 <span className="text-green-500 font-bold">{flexWR}%</span>
                             </div>
                             <div className="flex justify-between items-center">
-                                <span className="text-slate-400">Games</span>
+                                <span className="text-[#5a8ab0]">Games</span>
                                 <span className="text-white">{rankedFlex.wins} W / {rankedFlex.losses} L</span>
                             </div>
                         </div>
                     ) : (
-                        <p className="text-slate-400">Unranked</p>
+                        <p className="text-[#5a8ab0]">Unranked</p>
                     )}
                 </Card>
             </div>
 
             {/* Most Played Champions — stile OP.GG */}
             {topChampions.length > 0 && (
-                <Card className="p-6 bg-slate-900 border-slate-700">
+                <Card className="p-6 bg-[#070f1e] border-[#1a3558]">
                     <h3 className="text-xl font-bold text-white mb-4">Most Played Champions</h3>
                     <div className="space-y-2">
                         {topChampions.map((champ, idx) => {
                             const wrNum = parseFloat(champ.winRate);
-                            const wrColor = wrNum >= 60 ? "text-green-400" : wrNum >= 50 ? "text-blue-400" : "text-red-400";
-                            const barColor = wrNum >= 60 ? "bg-green-500" : wrNum >= 50 ? "bg-blue-500" : "bg-red-500";
+                            const wrColor = wrNum >= 60 ? "text-green-400" : wrNum >= 50 ? "text-[#4fc3f7]" : "text-red-400";
+                            const barColor = wrNum >= 60 ? "bg-green-500" : wrNum >= 50 ? "bg-[#2278ff]" : "bg-red-500";
                             return (
-                                <div key={champ.name} className="flex items-center gap-3 p-2 rounded-lg hover:bg-slate-800/60 transition-colors">
+                                <div key={champ.name} className="flex items-center gap-3 p-2 rounded-lg hover:bg-[#0d1f38]/60 transition-colors">
                                     {/* Rank number */}
-                                    <span className="text-slate-600 text-xs w-4 shrink-0">{idx + 1}</span>
+                                    <span className="text-[#2a5070] text-xs w-4 shrink-0">{idx + 1}</span>
                                     {/* Champion icon */}
                                     <img
                                         src={`https://ddragon.leagueoflegends.com/cdn/${PATCH}/img/champion/${champ.name}.png`}
@@ -248,32 +248,32 @@ export function ProfileTab({ profile, rankedSolo, rankedFlex, matches, myPuuid, 
                                     {/* Name + games */}
                                     <div className="w-28 shrink-0">
                                         <p className="text-white font-semibold text-sm truncate">{champ.name}</p>
-                                        <p className="text-slate-500 text-xs">{champ.games} partite</p>
+                                        <p className="text-[#3a6080] text-xs">{champ.games} partite</p>
                                     </div>
                                     {/* WR bar */}
                                     <div className="flex-1 min-w-0">
                                         <div className="flex justify-between text-xs mb-1">
-                                            <span className="text-slate-400">{champ.wins}V {champ.losses}S</span>
+                                            <span className="text-[#5a8ab0]">{champ.wins}V {champ.losses}S</span>
                                             <span className={`font-bold ${wrColor}`}>{champ.winRate}%</span>
                                         </div>
-                                        <div className="h-1.5 bg-slate-700 rounded-full overflow-hidden">
+                                        <div className="h-1.5 bg-[#142545] rounded-full overflow-hidden">
                                             <div className={`h-full rounded-full ${barColor}`} style={{ width: `${champ.winRate}%` }} />
                                         </div>
                                     </div>
                                     {/* KDA */}
                                     <div className="text-right shrink-0 w-24">
                                         <p className="text-white text-sm font-mono">
-                                            <span className="text-slate-300">{champ.avgKills}</span>
-                                            <span className="text-slate-500"> / </span>
+                                            <span className="text-[#8ab0cc]">{champ.avgKills}</span>
+                                            <span className="text-[#3a6080]"> / </span>
                                             <span className="text-red-400">{champ.avgDeaths}</span>
-                                            <span className="text-slate-500"> / </span>
-                                            <span className="text-slate-300">{champ.avgAssists}</span>
+                                            <span className="text-[#3a6080]"> / </span>
+                                            <span className="text-[#8ab0cc]">{champ.avgAssists}</span>
                                         </p>
                                         <p className="text-xs">
-                                            <span className={parseFloat(champ.kda) >= 3 || champ.kda === "Perfect" ? "text-yellow-400" : parseFloat(champ.kda) >= 2 ? "text-blue-400" : "text-slate-500"}>
+                                            <span className={parseFloat(champ.kda) >= 3 || champ.kda === "Perfect" ? "text-yellow-400" : parseFloat(champ.kda) >= 2 ? "text-[#4fc3f7]" : "text-[#3a6080]"}>
                                                 {champ.kda}
                                             </span>
-                                            <span className="text-slate-600"> KDA</span>
+                                            <span className="text-[#2a5070]"> KDA</span>
                                         </p>
                                     </div>
                                 </div>
@@ -285,28 +285,28 @@ export function ProfileTab({ profile, rankedSolo, rankedFlex, matches, myPuuid, 
 
             {/* Performance Stats */}
             {perfStats && (
-                <Card className="p-6 bg-slate-900 border-slate-700">
+                <Card className="p-6 bg-[#070f1e] border-[#1a3558]">
                     <h3 className="text-xl font-bold text-white mb-4">Performance Stats</h3>
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                        <div className="bg-slate-800 rounded-lg p-4 text-center">
+                        <div className="bg-[#0d1f38] rounded-lg p-4 text-center">
                             <Swords className="w-6 h-6 text-red-400 mx-auto mb-2" />
                             <p className="text-2xl font-bold text-white">{perfStats.avgKills}</p>
-                            <p className="text-slate-400 text-xs">Avg Kills</p>
+                            <p className="text-[#5a8ab0] text-xs">Avg Kills</p>
                         </div>
-                        <div className="bg-slate-800 rounded-lg p-4 text-center">
-                            <Eye className="w-6 h-6 text-slate-400 mx-auto mb-2" />
+                        <div className="bg-[#0d1f38] rounded-lg p-4 text-center">
+                            <Eye className="w-6 h-6 text-[#5a8ab0] mx-auto mb-2" />
                             <p className="text-2xl font-bold text-white">{perfStats.avgDeaths}</p>
-                            <p className="text-slate-400 text-xs">Avg Deaths</p>
+                            <p className="text-[#5a8ab0] text-xs">Avg Deaths</p>
                         </div>
-                        <div className="bg-slate-800 rounded-lg p-4 text-center">
+                        <div className="bg-[#0d1f38] rounded-lg p-4 text-center">
                             <Swords className="w-6 h-6 text-purple-400 mx-auto mb-2" />
                             <p className="text-2xl font-bold text-white">{perfStats.avgAssists}</p>
-                            <p className="text-slate-400 text-xs">Avg Assists</p>
+                            <p className="text-[#5a8ab0] text-xs">Avg Assists</p>
                         </div>
-                        <div className="bg-slate-800 rounded-lg p-4 text-center">
+                        <div className="bg-[#0d1f38] rounded-lg p-4 text-center">
                             <Trophy className="w-6 h-6 text-yellow-400 mx-auto mb-2" />
                             <p className="text-2xl font-bold text-white">{perfStats.kda}</p>
-                            <p className="text-slate-400 text-xs">KDA Ratio</p>
+                            <p className="text-[#5a8ab0] text-xs">KDA Ratio</p>
                         </div>
                     </div>
                 </Card>
