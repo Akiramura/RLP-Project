@@ -643,12 +643,12 @@
                     <span class="stat-label">In-game spectator data</span>
                 </div>
                 <div class="stat-item">
-                    <span class="stat-value">0</span>
-                    <span class="stat-label">Data stored on our servers</span>
+                    <span class="stat-value">60m</span>
+                    <span class="stat-label">Profile cache TTL, then purged</span>
                 </div>
                 <div class="stat-item">
                     <span class="stat-value">Free</span>
-                    <span class="stat-label">Open source, always</span>
+                    <span class="stat-label">Always free to use</span>
                 </div>
             </div>
         </div>
@@ -739,7 +739,8 @@
             </div>
 
             <div class="disclaimer">
-                RLP Project is not endorsed by Riot Games and does not reflect the views or opinions of Riot Games or anyone officially involved in producing or managing League of Legends. League of Legends and Riot Games are trademarks or registered trademarks of Riot Games, Inc.
+                <strong>RLP Project was created under Riot Games' "Legal Jibber Jabber" policy using assets owned by Riot Games. Riot Games does not endorse or sponsor this project.</strong><br><br>
+                RLP Project uses the Riot Games API and the League Client Update (LCU) API under the <a href="https://developer.riotgames.com/policies/general" target="_blank">Riot Games API General Policies</a>. Build and meta data are sourced from the OP.GG MCP API (<code>mcp-api.op.gg</code>), an official public API distributed by OP.GG Inc. under the MIT license. League of Legends and Riot Games are trademarks or registered trademarks of Riot Games, Inc.
             </div>
         </div>
     </section>
@@ -755,41 +756,44 @@
 
             <div class="legal-block fade-up">
                 <h3>1. Overview</h3>
-                <p>RLP Project ("the App") is a free, open-source desktop application built with Tauri and React. We are committed to protecting your privacy. This policy explains what data the App accesses, how it is used, and what we do not collect.</p>
+                <p>RLP Project ("the App") is a free desktop application built with Tauri and React. This policy explains exactly what data the App accesses, how it is processed, and what is stored — with no omissions.</p>
 
                 <h3>2. Data We Do NOT Collect</h3>
-                <p>We do not collect your Riot account credentials or passwords, payment information, IP addresses, device identifiers, or any sensitive personal data. We do not use cookies, advertising networks, or analytics SDKs of any kind.</p>
+                <p>The App does not collect your Riot account credentials or passwords, payment information, device identifiers, or any sensitive personal data. The App uses no cookies, advertising networks, analytics SDKs, or tracking of any kind.</p>
 
-                <h3>3. Data Accessed and Cached</h3>
-                <p>To function, the App retrieves publicly available League of Legends data via the Riot Games API and caches it to improve performance and enable offline access. Specifically:</p>
+                <h3>3. Data Accessed Locally (Never Transmitted)</h3>
+                <p>To detect champion select, the App reads the <strong>LCU lockfile</strong> that the League of Legends client writes to your local disk while running. This file contains a local port and authentication token used exclusively to make API calls to your own League client on <code>127.0.0.1</code>. This data is processed entirely on your machine and is never transmitted to our servers or any third party.</p>
+
+                <h3>4. Data Retrieved from Third-Party APIs</h3>
+                <p>The App makes requests to the following external APIs on your behalf:</p>
                 <ul>
-                    <li><strong>League Client credentials</strong> — RLP reads the local LCU (League Client Update) API lockfile while the League client is running on your machine. This data is used only to authenticate local API calls and never transmitted to our servers.</li>
-                    <li><strong>Riot Games API</strong> — The App retrieves your summoner profile, ranked entries, match history, and champion masteries via the official Riot Games API. These requests are governed by <a href="https://www.riotgames.com/en/privacy-notice" target="_blank">Riot Games' Privacy Notice</a>.</li>
-                    <li><strong>Third-party build data</strong> — The App fetches anonymized champion build statistics from public meta sources (OP.GG). No personal data is sent in these requests.</li>
+                    <li><strong>Riot Games API</strong> (official, authenticated with your API key) — The App retrieves your Riot ID / PUUID, summoner profile, ranked entries, match history, champion masteries, and live game data. These requests are governed by the <a href="https://www.riotgames.com/en/privacy-notice" target="_blank">Riot Games Privacy Notice</a>. The following endpoints are used: <code>account/v1</code>, <code>lol/summoner/v4</code>, <code>lol/league/v4</code>, <code>lol/match/v5</code>, <code>lol/spectator/v5</code>, <code>lol/champion-mastery/v4</code>.</li>
+                    <li><strong>OP.GG MCP API</strong> (<code>mcp-api.op.gg</code>) — The App queries OP.GG's official public MCP API (MIT-licensed, published by OP.GG Inc. at <a href="https://github.com/opgginc/opgg-mcp" target="_blank">github.com/opgginc/opgg-mcp</a>) to retrieve champion builds, summoner spell recommendations, rune configurations, tier list data, and match history. The tools used are: <code>lol_get_champion_analysis</code>, <code>lol_list_lane_meta_champions</code>, <code>lol_get_summoner_profile</code>, <code>lol_list_summoner_matches</code>. No personal data beyond your Riot ID is transmitted in these requests.</li>
+                    <li><strong>Data Dragon CDN</strong> (<code>ddragon.leagueoflegends.com</code>) — Champion and spell images are loaded directly from Riot's official CDN. No personal data is transmitted.</li>
                 </ul>
 
-                <h3>4. Data Storage — Neon Cloud Cache</h3>
-                <p>To reduce redundant Riot API calls and enable offline access, the App uses a serverless PostgreSQL database hosted on <a href="https://neon.tech" target="_blank">Neon</a> as a temporary cache.</p>
-                <p>Everything stored in this cache is <strong>entirely public data</strong> already freely accessible to anyone via the official Riot Games API — the same data visible on sites like OP.GG, U.GG, and Blitz. This includes summoner profiles, ranked entries, match history, and match details. No private, sensitive, or non-public information is ever stored.</p>
-                <p>Summoner data is automatically considered stale and refreshed after <strong>60 minutes</strong>. Match data is immutable and cached indefinitely since past match results never change. This cache exists purely for performance and is never used for advertising, profiling, or any purpose beyond serving the App.</p>
-                <p>You may request deletion of your cached data at any time by opening an issue on our <a href="https://github.com/akiramura/RLP-Project" target="_blank">GitHub repository</a> with your summoner name.</p>
-
-                <h3>5. Third-Party Services</h3>
-                <p>The App makes requests to:</p>
+                <h3>5. Server-Side Cache (Neon PostgreSQL)</h3>
+                <p>To reduce redundant API calls and improve load times, the App uses a serverless PostgreSQL database hosted on <a href="https://neon.tech" target="_blank">Neon</a> as a temporary cache. This cache stores only data that is already publicly accessible via the Riot Games API:</p>
                 <ul>
-                    <li><strong>Riot Games API</strong> — <a href="https://www.riotgames.com/en/privacy-notice" target="_blank">Riot Games Privacy Notice</a></li>
-                    <li><strong>Neon (neon.tech)</strong> — serverless PostgreSQL cache — <a href="https://neon.tech/privacy-policy" target="_blank">Neon Privacy Policy</a></li>
-                    <li><strong>Data Dragon CDN</strong> (<code>ddragon.leagueoflegends.com</code>) — champion images and game assets (no personal data transmitted)</li>
-                    <li><strong>OP.GG</strong> — aggregated champion build statistics (no personal data transmitted)</li>
+                    <li><strong>Summoner cache</strong> — PUUID, Riot ID (game name + tag), summoner profile, ranked entries, and match history. This data is considered stale and refreshed after <strong>60 minutes</strong>.</li>
+                    <li><strong>Match cache</strong> — Individual match details (participants, items, KDA, game duration) indexed by match ID. Match results do not change, so this data is cached without a TTL to avoid redundant Riot API calls.</li>
+                </ul>
+                <p>All cached data originates from the public Riot Games API. It is never sold, shared with third parties, or used for advertising or profiling. You may request deletion of your cached data by opening an issue on our <a href="https://github.com/akiramura/RLP-Project" target="_blank">GitHub repository</a> with your Riot ID.</p>
+
+                <h3>6. Third-Party Service Privacy Policies</h3>
+                <ul>
+                    <li><strong>Riot Games</strong> — <a href="https://www.riotgames.com/en/privacy-notice" target="_blank">Riot Games Privacy Notice</a></li>
+                    <li><strong>OP.GG</strong> — <a href="https://op.gg/policy/privacy" target="_blank">OP.GG Privacy Policy</a></li>
+                    <li><strong>Neon</strong> — <a href="https://neon.tech/privacy-policy" target="_blank">Neon Privacy Policy</a></li>
                 </ul>
 
-                <h3>6. Children's Privacy</h3>
-                <p>The App does not knowingly collect any data from anyone, including minors. Because we collect no personal data at all, there is no special risk to children's privacy.</p>
+                <h3>7. Children's Privacy</h3>
+                <p>The App does not knowingly collect personal data from any user. The data cached server-side is sourced entirely from Riot's public API and is not linked to a real-world identity beyond the Riot ID.</p>
 
-                <h3>7. Changes to This Policy</h3>
-                <p>If this policy changes, the updated version will be published here. Continued use of the App after changes constitutes acceptance of the new policy.</p>
+                <h3>8. Changes to This Policy</h3>
+                <p>If this policy changes, the updated version will be published here with a new "Last updated" date. Continued use of the App after changes constitutes acceptance of the updated policy.</p>
 
-                <h3>8. Contact</h3>
+                <h3>9. Contact</h3>
                 <p>For privacy-related questions, open an issue on our <a href="https://github.com/akiramura/RLP-Project" target="_blank">GitHub repository</a>.</p>
             </div>
         </div>
@@ -809,35 +813,44 @@
                 <p>By downloading, installing, or using RLP Project ("the App"), you agree to be bound by these Terms of Service. If you do not agree, do not use the App.</p>
 
                 <h3>2. License</h3>
-                <p>RLP Project is open-source software. The source code is available on GitHub under the terms of the applicable open-source license. You are free to use, modify, and distribute the App in accordance with that license.</p>
+                <p>RLP Project is proprietary software. The source code is publicly visible on <a href="https://github.com/akiramura/RLP-Project" target="_blank">GitHub</a> for transparency and review purposes. However, all rights are reserved by the author — unauthorized copying, distribution, modification, or use of the source code or any part of the App, in whole or in part, is strictly prohibited without explicit written permission from the copyright owner. See the <a href="https://github.com/akiramura/RLP-Project/blob/main/LICENSE" target="_blank">LICENSE</a> file for full terms.</p>
 
-                <h3>3. Use of the Riot Games API</h3>
-                <p>The App uses the Riot Games API. By using the App, you also agree to:</p>
+                <h3>3. Riot Games API &amp; LCU</h3>
+                <p>The App uses the <strong>Riot Games API</strong> (official, via a registered API key) and the <strong>League Client Update (LCU) API</strong> (a local REST API provided by the League of Legends client). By using the App, you also agree to:</p>
                 <ul>
-                    <li><a href="https://developer.riotgames.com/policies/general" target="_blank">Riot Games API Terms of Service</a></li>
+                    <li><a href="https://developer.riotgames.com/policies/general" target="_blank">Riot Games API General Policies</a></li>
+                    <li><a href="https://developer.riotgames.com/terms" target="_blank">Riot Games API Terms of Use</a></li>
                     <li><a href="https://www.riotgames.com/en/terms-of-service" target="_blank">Riot Games Terms of Service</a></li>
+                    <li><a href="https://www.riotgames.com/en/legal" target="_blank">Riot Games "Legal Jibber Jabber" policy</a></li>
                 </ul>
-                <p>The App is not endorsed by or affiliated with Riot Games, Inc.</p>
+                <p>Regarding the LCU specifically: <a href="https://www.riotgames.com/en/DevRel/vanguard-faq" target="_blank">Riot has confirmed</a> that apps using the LCU API are expected to continue working, though the LCU is not maintained by Developer Relations and Riot provides no formal support or update guarantees for it. Only approved LCU endpoints are used by this App. Before releasing or significantly updating the App, the developer notifies Riot as required by the <a href="https://www.riotgames.com/en/DevRel/changes-to-the-lcu-api-policy" target="_blank">LCU API policy</a>.</p>
+                <p><strong>RLP Project was created under Riot Games' "Legal Jibber Jabber" policy using assets owned by Riot Games. Riot Games does not endorse or sponsor this project.</strong></p>
 
-                <h3>4. Permitted Use</h3>
-                <p>You may use the App for personal, non-commercial purposes. You agree not to:</p>
+                <h3>4. OP.GG MCP API</h3>
+                <p>The App retrieves champion build data, summoner statistics, and tier list information from the <strong>OP.GG MCP API</strong> (<code>mcp-api.op.gg</code>), an official public API published by OP.GG Inc. under the MIT license at <a href="https://github.com/opgginc/opgg-mcp" target="_blank">github.com/opgginc/opgg-mcp</a>. By using the App, you also agree to <a href="https://op.gg/policy/terms" target="_blank">OP.GG's Terms of Service</a>. RLP Project is not affiliated with or endorsed by OP.GG Inc.</p>
+
+                <h3>5. Permitted Use</h3>
+                <p>You may use the App for personal, non-commercial purposes only. The App is provided free of charge and does not include any advertisements. You agree not to:</p>
                 <ul>
-                    <li>Use the App in violation of Riot Games' Terms of Service or game rules.</li>
-                    <li>Use the App to gain an unfair advantage in any competitive context beyond what is permitted by Riot Games.</li>
-                    <li>Reverse engineer or modify the App for malicious purposes.</li>
-                    <li>Use the App to harvest, scrape, or store data about other players without their consent.</li>
+                    <li>Use the App in violation of the Riot Games Terms of Service, API policies, or game rules.</li>
+                    <li>Use the App to gain a competitive advantage beyond what is expressly permitted by Riot Games' <a href="https://support-leagueoflegends.riotgames.com/hc/en-us/articles/225266848" target="_blank">third-party application policy</a> — this includes features explicitly prohibited by Riot such as enemy ultimate timers.</li>
+                    <li>Use the App to harvest, scrape, or store data about other players without their consent, or in excess of what the App requires for its stated functionality.</li>
+                    <li>Modify or redistribute the App for commercial purposes without a written license from the respective IP holders.</li>
                 </ul>
 
-                <h3>5. Disclaimer of Warranties</h3>
-                <p>The App is provided "as is" without warranty of any kind, express or implied, including but not limited to warranties of merchantability, fitness for a particular purpose, or non-infringement. We make no guarantee that the App will work correctly or remain compatible with future versions of the League of Legends client.</p>
+                <h3>6. Policy Compliance &amp; Changes</h3>
+                <p>Riot Games updates its third-party application policies over time. The developer of RLP Project is responsible for keeping the App compliant with current Riot and OP.GG policies. If a policy change requires a feature to be removed or modified, that change will be implemented promptly. Users are responsible for ensuring they are running an up-to-date version of the App.</p>
 
-                <h3>6. Limitation of Liability</h3>
-                <p>To the fullest extent permitted by applicable law, the developers of RLP Project shall not be liable for any indirect, incidental, special, consequential, or punitive damages arising from your use of the App.</p>
+                <h3>7. Disclaimer of Warranties</h3>
+                <p>The App is provided "as is" without warranty of any kind, express or implied. We make no guarantee that the App will remain compatible with future versions of the League of Legends client, the Riot Games API, or the OP.GG MCP API. Riot Games may modify or discontinue LCU API access at any time without notice.</p>
 
-                <h3>7. Changes to These Terms</h3>
-                <p>We reserve the right to update these Terms at any time. Updated terms will be published on this page. Continued use after changes constitutes acceptance.</p>
+                <h3>8. Limitation of Liability</h3>
+                <p>To the fullest extent permitted by applicable law, the developers of RLP Project shall not be liable for any indirect, incidental, special, consequential, or punitive damages arising from your use of the App, including but not limited to account actions taken by Riot Games.</p>
 
-                <h3>8. Contact</h3>
+                <h3>9. Changes to These Terms</h3>
+                <p>We reserve the right to update these Terms at any time. Updated terms will be published on this page with a new "Last updated" date. Continued use of the App after changes constitutes acceptance.</p>
+
+                <h3>10. Contact</h3>
                 <p>For questions about these Terms, open an issue on our <a href="https://github.com/akiramura/RLP-Project" target="_blank">GitHub repository</a>.</p>
             </div>
         </div>
@@ -854,7 +867,7 @@
                     <li><a href="#terms">Terms</a></li>
                     <li><a href="https://github.com/akiramura/RLP-Project" target="_blank">GitHub</a></li>
                 </ul>
-                <span class="footer-copy">RLP isn't endorsed by Riot Games.</span>
+                <span class="footer-copy">RLP Project was created under Riot Games' "Legal Jibber Jabber" policy. Riot Games does not endorse or sponsor this project.</span>
             </div>
         </div>
     </footer>
