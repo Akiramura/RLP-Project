@@ -33,8 +33,11 @@ Trademark
 The name RLP and its associated logo are proprietary identifiers of this project. Use of the name or logo in any form — including forks, derivative works, or third-party distributions — is not permitted without explicit written authorization from the author.
 
 Legal Notice
-RLP isn't endorsed by Riot Games and doesn't reflect the views or opinions of Riot Games or anyone officially involved in producing or managing Riot Games properties. Riot Games, League of Legends, and all associated properties are trademarks or registered trademarks of Riot Games, Inc.
-This application uses the Riot Games API in accordance with Riot Games' Developer Policies.
+RLP Project was created under Riot Games' "Legal Jibber Jabber" policy using assets owned by Riot Games. Riot Games does not endorse or sponsor this project.
+
+Riot Games, League of Legends, and all associated properties are trademarks or registered trademarks of Riot Games, Inc. This application uses the Riot Games API and the League Client Update (LCU) API in accordance with Riot Games' Developer Policies.
+
+Build and meta data are sourced from the OP.GG MCP API (github.com/opgginc/opgg-mcp), an official public API published by OP.GG Inc. under the MIT license. RLP Project is not affiliated with or endorsed by OP.GG Inc.
 
 Auto-Updater
 RLP includes a built-in auto-updater powered by tauri-plugin-updater. On each launch, the app checks for new releases. If an update is available, you will be prompted to install it automatically.
