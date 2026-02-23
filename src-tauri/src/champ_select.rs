@@ -109,6 +109,8 @@ pub struct ChampSelectSession {
     pub in_progress: bool,
     pub champion_name: String,
     pub assigned_position: String,
+    /// "ranked" | "aram" | "urf" | "arurf" | "normal" — ricavato dal gameMode LCU
+    pub game_mode: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -218,21 +220,30 @@ async fn mcp_extract_text(text: &str) -> Option<String> {
     None
 }
 
-async fn opgg_get_champion_build(champion_name: &str, position: &str) -> Result<Value, String> {
-    eprintln!("[RLP] opgg_get_champion_build: {} {}", champion_name, position);
+async fn opgg_get_champion_build(champion_name: &str, position: &str, game_mode: &str) -> Result<Value, String> {
+    eprintln!("[RLP] opgg_get_champion_build: {} {} (mode={})", champion_name, position, game_mode);
 
     let client = Client::builder()
         .danger_accept_invalid_certs(true)
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
         .build().map_err(|e| e.to_string())?;
 
+    // OP.GG richiede sempre il campo position — per ARAM/URF usiamo "mid" come fallback
+    // (l'API non accetta stringa vuota né "none", ma ignora la posizione se game_mode=aram/urf)
     let pos = match position.to_uppercase().as_str() {
         "TOP"                     => "top",
         "JUNGLE"                  => "jungle",
         "MIDDLE"|"MID"            => "mid",
         "BOTTOM"|"BOT"|"ADC"      => "adc",
         "SUPPORT"|"UTILITY"       => "support",
-        _                         => "mid",
+        _                         => "mid",  // DEFAULT, ARAM, URF → mid come placeholder
+    };
+
+    // game_mode OP.GG: "ranked" | "aram" | "urf"
+    let opgg_mode = match game_mode {
+        "aram"   => "aram",
+        "urf"    => "urf",
+        _        => "ranked",
     };
     let champ_upper = champion_name.to_uppercase();
     const MCP_URL: &str = "https://mcp-api.op.gg/mcp";
@@ -266,7 +277,7 @@ async fn opgg_get_champion_build(champion_name: &str, position: &str) -> Result<
             "name":"lol_get_champion_analysis",
             "arguments":{
                 "champion": champ_upper,
-                "game_mode": "ranked",
+                "game_mode": opgg_mode,
                 "position": pos,
                 "lang": "en_US",
                 "desired_output_fields": [
@@ -730,7 +741,7 @@ pub async fn get_champ_select_session() -> Result<ChampSelectSession, String> {
     let lcu = LcuClient::new().ok_or("CLIENT_CLOSED")?;
     let session: Value = lcu.get("/lol-champ-select/v1/session").await.ok_or("Nessuna champion select attiva")?;
     if session.get("errorCode").is_some() {
-        return Ok(ChampSelectSession { in_progress:false, champion_name:String::new(), assigned_position:String::new() });
+        return Ok(ChampSelectSession { in_progress:false, champion_name:String::new(), assigned_position:String::new(), game_mode:String::new() });
     }
     let my_cell = session["localPlayerCellId"].as_i64().unwrap_or(-1);
     let my_slot = session["myTeam"].as_array().and_then(|team| team.iter().find(|p| p["cellId"].as_i64()==Some(my_cell)));
@@ -750,8 +761,25 @@ pub async fn get_champ_select_session() -> Result<ChampSelectSession, String> {
             }
         }
     }
+    // Legge il game mode dalla sessione LCU (gameConfig.gameMode)
+    let game_config: Value = lcu.get("/lol-gameflow/v1/session").await.unwrap_or(json!({}));
+    let raw_mode = game_config
+        .pointer("/gameData/queue/gameMode")
+        .or_else(|| game_config.pointer("/gameData/gameTypeConfig/name"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("CLASSIC")
+        .to_uppercase();
+    let game_mode = match raw_mode.as_str() {
+        "ARAM"                   => "aram",
+        "URF" | "ONEFORALL"      => "urf",
+        "ARURF"                  => "urf",
+        "ULTBOOK"                => "urf",  // Ultimate Spellbook — usa build URF
+        _                        => "ranked",
+    }.to_string();
+    eprintln!("[RLP] gameMode LCU raw={} → {}", raw_mode, game_mode);
+
     if champ_id == 0 {
-        return Ok(ChampSelectSession { in_progress:true, champion_name:String::new(), assigned_position });
+        return Ok(ChampSelectSession { in_progress:true, champion_name:String::new(), assigned_position, game_mode });
     }
     
     let http = Client::builder().danger_accept_invalid_certs(true).build().unwrap();
@@ -762,7 +790,7 @@ pub async fn get_champ_select_session() -> Result<ChampSelectSession, String> {
         .and_then(|map| map.values().find(|c| c["key"].as_str().map(|k| k==champ_id.to_string()).unwrap_or(false)))
         .and_then(|c| c["id"].as_str()).unwrap_or("Unknown").to_string();
         
-    Ok(ChampSelectSession { in_progress:true, champion_name, assigned_position })
+    Ok(ChampSelectSession { in_progress:true, champion_name, assigned_position, game_mode })
 }
 
 #[tauri::command]
@@ -782,8 +810,8 @@ pub async fn debug_champ_select_slot() -> Result<Value, String> {
 }
 
 #[tauri::command]
-pub async fn auto_import_build(champion_name: String, assigned_position: String) -> Result<ImportResult, String> {
-    eprintln!("[RLP] auto_import_build: {} {}", champion_name, assigned_position);
+pub async fn auto_import_build(champion_name: String, assigned_position: String, game_mode: String) -> Result<ImportResult, String> {
+    eprintln!("[RLP] auto_import_build: {} {} mode={}", champion_name, assigned_position, game_mode);
     let mut result = ImportResult {
         runes_imported:false, summoners_imported:false, items_imported:false,
         rune_page_name:None, primary_path:None, summoner_spells:Vec::new(), item_blocks:None, errors:Vec::new(),
@@ -793,8 +821,22 @@ pub async fn auto_import_build(champion_name: String, assigned_position: String)
         Some(c) => c,
         None => { result.errors.push("Client LoL non disponibile".to_string()); return Ok(result); }
     };
+
+    // Normalizza game_mode (il frontend manda quello che viene dalla sessione)
+    let mode = match game_mode.to_lowercase().as_str() {
+        "aram"  => "aram",
+        "urf" | "arurf" | "ultbook" | "oneforall" => "urf",
+        _       => "ranked",
+    };
+
+    // Label leggibile per rune page e item set title
+    let mode_label = match mode {
+        "aram"   => "ARAM",
+        "urf"    => "URF",
+        _        => &assigned_position,
+    };
     
-    let build = match opgg_get_champion_build(&champion_name, &assigned_position).await {
+    let build = match opgg_get_champion_build(&champion_name, &assigned_position, mode).await {
         Ok(b) => b,
         Err(e) => { result.errors.push(format!("OP.GG fetch fallito: {}", e)); return Ok(result); }
     };
@@ -803,17 +845,23 @@ pub async fn auto_import_build(champion_name: String, assigned_position: String)
     let puuid = summoner["puuid"].as_str().unwrap_or("").to_string();
     eprintln!("[RLP] summoner puuid={}", puuid);
     
-    match import_runes(&lcu, &champion_name, &assigned_position, &build).await {
+    match import_runes(&lcu, &champion_name, mode_label, &build).await {
         Ok((name,path)) => { result.runes_imported=true; result.rune_page_name=Some(name); result.primary_path=Some(path); }
         Err(e) => result.errors.push(format!("Rune: {}", e)),
     }
     
-    match import_summoners(&lcu, &build).await {
-        Ok(spells) => { result.summoners_imported=true; result.summoner_spells=spells; }
-        Err(e) => result.errors.push(format!("Summoners: {}", e)),
+    // In ARAM e URF il client non permette di cambiare i summoner spell via LCU → skip silenzioso
+    if mode == "ranked" {
+        match import_summoners(&lcu, &build).await {
+            Ok(spells) => { result.summoners_imported=true; result.summoner_spells=spells; }
+            Err(e) => result.errors.push(format!("Summoners: {}", e)),
+        }
+    } else {
+        eprintln!("[RLP] Summoner spells skip (mode={})", mode);
+        result.summoners_imported = true; // non è un errore, è expected
     }
     
-    match import_item_set(&lcu, &champion_name, &assigned_position, &build, &puuid).await {
+    match import_item_set(&lcu, &champion_name, mode_label, &build, &puuid).await {
         Ok(blocks) => { result.items_imported=true; result.item_blocks=Some(blocks); }
         Err(e) => result.errors.push(format!("Item set: {}", e)),
     }
