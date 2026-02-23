@@ -338,6 +338,9 @@ export default function App() {
             }
         }
         checkForUpdates();
+        const FOUR_HOURS = 4 * 60 * 60 * 1000;
+        const interval = setInterval(checkForUpdates, FOUR_HOURS);
+        return () => clearInterval(interval);
     }, []);
 
     async function handleUpdate() {
