@@ -32,10 +32,11 @@ latest.json
 *.sig
 WixTools/
 
-# Signing / release script
+# Signing / release scripts (uso interno)
 *.key
 *.key.pub
 release.ps1
+UPDATER_SETUP.ps1
 
 # Editor
 .vscode/*
