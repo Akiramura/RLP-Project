@@ -34,11 +34,11 @@
                             ]
                },
     "plugins":  {
-                    "updater":  {
-                                    "pubkey":  "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IENGMUUyMDE2Q0JEOUNGQUMKUldTc3o5bkxGaUFlejBVYkJBRUVzbkdDRUd3Z2VjTGgxTEVFaHpjaEd3UEdaYjIyQkZFMHlyVC8K",
-                                    "endpoints":  [
-                                                      "https://github.com/Akiramura/RLP-Project/releases/latest/download/latest.json"
-                                                  ]
-                                }
+      "updater": {
+        "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDAwQ0Y2QjRCNjlCQUJBNzMKUldSenVycHBTMnZQQUlOa1lHcE5wMXRXNDE0ZXZxczE1M1Fhd3JiK0lpZm90U2o5cC9KYUNSSWQK",
+        "endpoints": [
+          "https://github.com/Akiramura/RLP-Project/releases/latest/download/latest.json"
+        ]
+      }
                 }
 }
