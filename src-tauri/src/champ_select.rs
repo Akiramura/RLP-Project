@@ -850,7 +850,7 @@ pub async fn auto_import_build(champion_name: String, assigned_position: String,
         Err(e) => result.errors.push(format!("Rune: {}", e)),
     }
     
-    // In ARAM e URF il client non permette di cambiare i summoner spell via LCU → skip silenziosoo
+    // In ARAM e URF il client non permette di cambiare i summoner spell via LCU → skip silenziosooo
     if mode == "ranked" {
         match import_summoners(&lcu, &build).await {
             Ok(spells) => { result.summoners_imported=true; result.summoner_spells=spells; }
