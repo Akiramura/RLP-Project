@@ -4,7 +4,7 @@ import { Card } from "./ui/card";
 import { Shield, Swords, Loader2, WifiOff, Wifi, Clock } from "lucide-react";
 import { PATCH } from "./constants";
 
-// ── Costantii ──────────────────────────────────────────────────────────────────
+// ── Costantiii ──────────────────────────────────────────────────────────────────
 
 const TIER_COLOR = {
     IRON: "text-[#5a8ab0]",
