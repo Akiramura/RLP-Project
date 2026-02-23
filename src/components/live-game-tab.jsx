@@ -7,26 +7,26 @@ import { PATCH } from "./constants";
 // ── Costanti ──────────────────────────────────────────────────────────────────
 
 const TIER_COLOR = {
-    IRON: "text-slate-400",
+    IRON: "text-[#5a8ab0]",
     BRONZE: "text-amber-600",
-    SILVER: "text-slate-300",
+    SILVER: "text-[#8ab0cc]",
     GOLD: "text-yellow-400",
     PLATINUM: "text-teal-400",
     EMERALD: "text-emerald-400",
-    DIAMOND: "text-blue-400",
+    DIAMOND: "text-[#4fc3f7]",
     MASTER: "text-purple-400",
     GRANDMASTER: "text-red-400",
     CHALLENGER: "text-yellow-300",
 };
 
 const TIER_BG = {
-    IRON: "bg-slate-700/40",
+    IRON: "bg-[#142545]/40",
     BRONZE: "bg-amber-900/30",
-    SILVER: "bg-slate-600/30",
+    SILVER: "bg-[#1e3560]/30",
     GOLD: "bg-yellow-900/30",
     PLATINUM: "bg-teal-900/30",
     EMERALD: "bg-emerald-900/30",
-    DIAMOND: "bg-blue-900/30",
+    DIAMOND: "bg-[#0a1e4a]/30",
     MASTER: "bg-purple-900/30",
     GRANDMASTER: "bg-red-900/30",
     CHALLENGER: "bg-yellow-900/20",
@@ -122,10 +122,10 @@ function useChampIdMap() {
 function RankBadge({ tier, rank, lp }) {
     const t = tier?.toUpperCase() ?? "";
     if (!t || t === "NONE" || t === "") {
-        return <span className="text-slate-600 text-xs font-medium">Unranked</span>;
+        return <span className="text-[#2a5070] text-xs font-medium">Unranked</span>;
     }
-    const color = TIER_COLOR[t] ?? "text-slate-300";
-    const bg = TIER_BG[t] ?? "bg-slate-700/30";
+    const color = TIER_COLOR[t] ?? "text-[#8ab0cc]";
+    const bg = TIER_BG[t] ?? "bg-[#142545]/30";
     const short = TIER_SHORT[t] ?? t;
     const showDiv = !NO_DIVISION.includes(t);
     return (
@@ -145,7 +145,7 @@ function BanRow({ bans, champIdMap, side }) {
 
     return (
         <div className={`flex gap-1 px-1 mt-1 ${isLeft ? "justify-start" : "justify-end"}`}>
-            <span className="text-slate-600 text-xs self-center mr-0.5">Ban:</span>
+            <span className="text-[#2a5070] text-xs self-center mr-0.5">Ban:</span>
             {sorted.map((b, i) => {
                 const champName = b.champion_id > 0 ? champIdMap[b.champion_id] : null;
                 return champName ? (
@@ -158,13 +158,13 @@ function BanRow({ bans, champIdMap, side }) {
                             onError={e => { e.target.style.display = "none"; }}
                         />
                         {/* Tooltip con nome */}
-                        <span className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1 px-1.5 py-0.5 text-xs bg-slate-900 text-slate-200 rounded whitespace-nowrap opacity-0 group-hover:opacity-100 pointer-events-none z-10 border border-slate-700">
+                        <span className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1 px-1.5 py-0.5 text-xs bg-[#070f1e] text-[#b8d4e8] rounded whitespace-nowrap opacity-0 group-hover:opacity-100 pointer-events-none z-10 border border-[#1a3558]">
                             {champName}
                         </span>
                     </div>
                 ) : (
-                    <div key={i} className="w-6 h-6 rounded bg-slate-800 border border-slate-700 flex items-center justify-center">
-                        <span className="text-slate-600 text-[8px]">?</span>
+                    <div key={i} className="w-6 h-6 rounded bg-[#0d1f38] border border-[#1a3558] flex items-center justify-center">
+                        <span className="text-[#2a5070] text-[8px]">?</span>
                     </div>
                 );
             })}
@@ -180,8 +180,8 @@ function PlayerRow({ player, champIdMap, side, duoWith }) {
     return (
         <div className={`flex items-center gap-2 py-1.5 px-2 rounded-xl transition-colors
             ${player.is_me
-                ? "bg-blue-950/60 border border-blue-600/40 shadow-sm shadow-blue-900/20"
-                : "hover:bg-slate-800/40"}
+                ? "bg-blue-950/60 border border-[#1e6fff]/40 shadow-sm shadow-blue-900/20"
+                : "hover:bg-[#0d1f38]/40"}
             ${isLeft ? "flex-row" : "flex-row-reverse"}`}
         >
             {/* Profile icon + Champion icon sovrapposti */}
@@ -192,15 +192,15 @@ function PlayerRow({ player, champIdMap, side, duoWith }) {
                         src={champUrl(champName)}
                         alt={champName}
                         title={champName}
-                        className="w-11 h-11 rounded-lg object-cover bg-slate-800 border border-slate-700"
+                        className="w-11 h-11 rounded-lg object-cover bg-[#0d1f38] border border-[#1a3558]"
                         onError={e => {
                             e.target.style.display = "none";
                             e.target.nextElementSibling?.classList.remove("hidden");
                         }}
                     />
                 ) : (
-                    <div className="w-11 h-11 rounded-lg bg-slate-800 border border-slate-700 flex items-center justify-center">
-                        <Shield className="w-5 h-5 text-slate-600" />
+                    <div className="w-11 h-11 rounded-lg bg-[#0d1f38] border border-[#1a3558] flex items-center justify-center">
+                        <Shield className="w-5 h-5 text-[#2a5070]" />
                     </div>
                 )}
                 {/* Profile icon piccola in basso a destra */}
@@ -208,13 +208,13 @@ function PlayerRow({ player, champIdMap, side, duoWith }) {
                     <img
                         src={profileUrl(player.profile_icon_id)}
                         alt=""
-                        className="absolute -bottom-1 -right-1 w-5 h-5 rounded-full object-cover border-2 border-slate-900 bg-slate-800"
+                        className="absolute -bottom-1 -right-1 w-5 h-5 rounded-full object-cover border-2 border-[#040c1a] bg-[#0d1f38]"
                         onError={e => { e.target.style.display = "none"; }}
                     />
                 )}
                 {/* Pallino blu per "sono io" */}
                 {player.is_me && (
-                    <span className="absolute -top-1 -left-1 w-3 h-3 bg-blue-500 rounded-full border-2 border-slate-900" />
+                    <span className="absolute -top-1 -left-1 w-3 h-3 bg-[#2278ff] rounded-full border-2 border-[#040c1a]" />
                 )}
             </div>
 
@@ -225,7 +225,7 @@ function PlayerRow({ player, champIdMap, side, duoWith }) {
                         src={spellUrl(sp) ?? ""}
                         alt={sp ?? ""}
                         title={sp ?? ""}
-                        className="w-5 h-5 rounded object-cover bg-slate-800"
+                        className="w-5 h-5 rounded object-cover bg-[#0d1f38]"
                         onError={e => { e.target.style.display = "none"; }}
                     />
                 ))}
@@ -235,7 +235,7 @@ function PlayerRow({ player, champIdMap, side, duoWith }) {
             <div className={`flex-1 min-w-0 ${isLeft ? "text-left" : "text-right"}`}>
                 <div className={`flex items-center gap-1 ${isLeft ? "" : "justify-end"}`}>
                     <p className={`text-sm font-semibold truncate leading-tight
-                        ${player.is_me ? "text-blue-300" : "text-slate-100"}`}>
+                        ${player.is_me ? "text-[#7dd8ff]" : "text-[#c8e4f8]"}`}>
                         {player.summoner_name || "—"}
                     </p>
                     {duoWith && (
@@ -251,7 +251,7 @@ function PlayerRow({ player, champIdMap, side, duoWith }) {
 
             {/* Champion name piccola a destra/sinistra */}
             {champName && (
-                <span className={`text-xs text-slate-500 shrink-0 hidden lg:block w-16 truncate
+                <span className={`text-xs text-[#3a6080] shrink-0 hidden lg:block w-16 truncate
                     ${isLeft ? "text-right" : "text-left"}`}>
                     {champName}
                 </span>
@@ -262,10 +262,10 @@ function PlayerRow({ player, champIdMap, side, duoWith }) {
 
 function TeamPanel({ players, bans, side, champIdMap, duoMap }) {
     const isOrder = side === "ORDER";
-    const dotColor = isOrder ? "bg-blue-500" : "bg-red-500";
+    const dotColor = isOrder ? "bg-[#2278ff]" : "bg-red-500";
     const label = isOrder ? "TEAM BLU" : "TEAM ROSSO";
-    const color = isOrder ? "text-blue-400" : "text-red-400";
-    const border = isOrder ? "border-blue-900/30" : "border-red-900/30";
+    const color = isOrder ? "text-[#4fc3f7]" : "text-red-400";
+    const border = isOrder ? "border-[#0a1e4a]/30" : "border-red-900/30";
 
     // Rank summary header: es. "M · M · M · M · M"
     const rankStr = players.map(p => {
@@ -276,14 +276,14 @@ function TeamPanel({ players, bans, side, champIdMap, duoMap }) {
     }).join(" · ");
 
     return (
-        <div className={`flex-1 min-w-0 border rounded-2xl ${border} bg-slate-900/40 p-3`}>
+        <div className={`flex-1 min-w-0 border rounded-2xl ${border} bg-[#070f1e]/40 p-3`}>
             {/* Team header */}
             <div className="flex items-center justify-between mb-1 px-1 gap-2">
                 <div className="flex items-center gap-1.5">
                     <span className={`w-2 h-2 rounded-full ${dotColor}`} />
                     <p className={`text-xs font-bold uppercase tracking-widest ${color}`}>{label}</p>
                 </div>
-                <p className="text-xs text-slate-500 font-mono truncate">{rankStr}</p>
+                <p className="text-xs text-[#3a6080] font-mono truncate">{rankStr}</p>
             </div>
 
             {/* Ban row */}
@@ -294,7 +294,7 @@ function TeamPanel({ players, bans, side, champIdMap, duoMap }) {
                     <PlayerRow key={i} player={p} champIdMap={champIdMap} side={side} duoWith={duoMap?.[p.puuid]} />
                 ))}
                 {players.length === 0 && (
-                    <p className="text-slate-600 text-xs text-center py-4">Nessun giocatore</p>
+                    <p className="text-[#2a5070] text-xs text-center py-4">Nessun giocatore</p>
                 )}
             </div>
         </div>
@@ -373,8 +373,8 @@ export function LiveGameTab({ puuidOverride = null, myPuuid = null }) {
     if (loading) {
         return (
             <div className="flex items-center justify-center h-64 gap-3">
-                <Loader2 className="w-7 h-7 text-blue-400 animate-spin" />
-                <p className="text-slate-400">Verifica partita in corso...</p>
+                <Loader2 className="w-7 h-7 text-[#4fc3f7] animate-spin" />
+                <p className="text-[#5a8ab0]">Verifica partita in corso...</p>
             </div>
         );
     }
@@ -383,9 +383,9 @@ export function LiveGameTab({ puuidOverride = null, myPuuid = null }) {
     if (error === "client_closed") {
         return (
             <div className="flex flex-col items-center justify-center h-64 gap-3">
-                <WifiOff className="w-12 h-12 text-slate-700" />
-                <p className="text-slate-400 text-lg font-medium">Client non rilevato</p>
-                <p className="text-slate-600 text-sm">Apri League of Legends per usare questa funzione.</p>
+                <WifiOff className="w-12 h-12 text-[#1a3558]" />
+                <p className="text-[#5a8ab0] text-lg font-medium">Client non rilevato</p>
+                <p className="text-[#2a5070] text-sm">Apri League of Legends per usare questa funzione.</p>
             </div>
         );
     }
@@ -394,18 +394,18 @@ export function LiveGameTab({ puuidOverride = null, myPuuid = null }) {
     if (!data?.in_game) {
         return (
             <div className="flex flex-col items-center justify-center h-64 gap-4">
-                <Shield className="w-14 h-14 text-slate-700" />
+                <Shield className="w-14 h-14 text-[#1a3558]" />
                 <div className="text-center">
-                    <p className="text-slate-400 text-lg font-medium">
+                    <p className="text-[#5a8ab0] text-lg font-medium">
                         {puuidOverride ? "Giocatore non in partita" : "Nessuna partita in corso"}
                     </p>
-                    <p className="text-slate-600 text-sm mt-1">
+                    <p className="text-[#2a5070] text-sm mt-1">
                         {puuidOverride
                             ? "Questo giocatore non è attualmente in una partita live."
                             : "Entra in una partita per vedere i dati live."}
                     </p>
                 </div>
-                <div className="flex items-center gap-2 text-xs text-slate-600">
+                <div className="flex items-center gap-2 text-xs text-[#2a5070]">
                     <Wifi className="w-3 h-3 text-green-500" />
                     <span>Controllo automatico ogni 30s</span>
                 </div>
@@ -447,7 +447,7 @@ export function LiveGameTab({ puuidOverride = null, myPuuid = null }) {
         <div className="space-y-4">
 
             {/* Header */}
-            <Card className="px-5 py-3.5 bg-gradient-to-r from-slate-900 to-slate-800 border-slate-700">
+            <Card className="px-5 py-3.5 bg-gradient-to-r from-[#070f1e] to-[#0d1f38] border-[#1a3558]">
                 <div className="flex items-center justify-between flex-wrap gap-3">
                     <div className="flex items-center gap-3">
                         <div className="relative shrink-0">
@@ -456,13 +456,13 @@ export function LiveGameTab({ puuidOverride = null, myPuuid = null }) {
                         </div>
                         <div>
                             <h2 className="text-white font-bold text-base leading-tight">Partita in corso</h2>
-                            <p className="text-slate-400 text-xs">{data.queue_type}</p>
+                            <p className="text-[#5a8ab0] text-xs">{data.queue_type}</p>
                         </div>
                     </div>
                     <div className="flex items-center gap-2">
                         {gameTimeSec > 0 && (
-                            <div className="flex items-center gap-1.5 text-slate-200 bg-slate-800 px-3 py-1.5 rounded-lg border border-slate-700">
-                                <Clock className="w-3.5 h-3.5 text-slate-400" />
+                            <div className="flex items-center gap-1.5 text-[#b8d4e8] bg-[#0d1f38] px-3 py-1.5 rounded-lg border border-[#1a3558]">
+                                <Clock className="w-3.5 h-3.5 text-[#5a8ab0]" />
                                 <span className="font-mono font-bold tabular-nums">
                                     {formatTimer(gameTimeSec)}
                                 </span>
@@ -487,7 +487,7 @@ export function LiveGameTab({ puuidOverride = null, myPuuid = null }) {
                 />
                 <div className="flex flex-col items-center justify-center gap-1 shrink-0 pt-12">
                     <div className="w-px h-12 bg-gradient-to-b from-transparent via-slate-600 to-transparent" />
-                    <span className="text-slate-600 font-black text-xs">VS</span>
+                    <span className="text-[#2a5070] font-black text-xs">VS</span>
                     <div className="w-px h-12 bg-gradient-to-b from-transparent via-slate-600 to-transparent" />
                 </div>
                 <TeamPanel

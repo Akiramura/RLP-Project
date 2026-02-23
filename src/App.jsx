@@ -8,15 +8,20 @@ import { MatchHistoryTab } from "./components/match-history-tab";
 import { ChampionMetaTab } from "./components/champion-meta-tab";
 import { MetaTab } from "./components/meta-tab";
 import { MasteriesTab } from "./components/masteries-tab";
-import { User, History, TrendingUp, Search, BarChart2, Swords, Tv, Star } from "lucide-react";
+import { User, History, TrendingUp, Search, BarChart2, Swords, Tv, Star, Download, X, RefreshCw, CheckCircle2 } from "lucide-react";
 import { Input } from "./components/ui/input";
 import { Button } from "./components/ui/button";
 import "./App.css";
 
 import { ChampSelectTab } from "./components/champ-select-tab";
 import { LiveGameTab } from "./components/live-game-tab";
+import { UpdateBanner } from "./components/ui/UpdateBanner";
 
 export default function App() {
+    const [updateInfo, setUpdateInfo] = useState(null);
+    const [updateStatus, setUpdateStatus] = useState("idle");
+    const [updateProgress, setUpdateProgress] = useState(0);
+    const updateRef = useRef(null);
     const [profileData, setProfileData] = useState(null);
     const [error, setError] = useState(null);
     const [loading, setLoading] = useState(true);
@@ -322,13 +327,9 @@ export default function App() {
             try {
                 const update = await check();
                 if (update?.available) {
-                    const yes = await window.confirm(
-                        `Disponibile RLP v${update.version}!\n\n${update.body ?? ""}\n\nVuoi aggiornare ora?`
-                    );
-                    if (yes) {
-                        await update.downloadAndInstall();
-                        await relaunch();
-                    }
+                    updateRef.current = update;
+                    setUpdateInfo({ version: update.version, body: update.body ?? "" });
+                    setUpdateStatus("available");
                 } else {
                     console.log("[Updater] Nessun aggiornamento disponibile. Versione attuale:", update);
                 }
@@ -338,6 +339,36 @@ export default function App() {
         }
         checkForUpdates();
     }, []);
+
+    async function handleUpdate() {
+        if (!updateRef.current) return;
+        setUpdateStatus("downloading");
+        setUpdateProgress(0);
+        try {
+            await updateRef.current.downloadAndInstall((event) => {
+                if (event.event === "Started") {
+                    setUpdateProgress(0);
+                } else if (event.event === "Progress") {
+                    const { chunkLength, contentLength } = event.data;
+                    if (contentLength) {
+                        setUpdateProgress(prev => Math.min(100, prev + (chunkLength / contentLength) * 100));
+                    }
+                } else if (event.event === "Finished") {
+                    setUpdateProgress(100);
+                    setUpdateStatus("done");
+                    setTimeout(() => relaunch(), 1500);
+                }
+            });
+        } catch (e) {
+            console.error("[Updater] Errore download:", e);
+            setUpdateStatus("available");
+        }
+    }
+
+    function handleDismissUpdate() {
+        setUpdateStatus("idle");
+        setUpdateInfo(null);
+    }
 
     async function loadMoreMatches() {
         if (!profileData?.puuid) return;
@@ -517,9 +548,9 @@ export default function App() {
     const activeProfile = searchData ? searchData.profile : profileData?.profile;
 
     return (
-        <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
+        <div className="min-h-screen bg-gradient-to-br from-[#040c1a] via-[#070f1e] to-[#040c1a]">
             {/* Header */}
-            <header className="border-b border-slate-800 bg-slate-900/50 backdrop-blur-sm sticky top-0 z-50">
+            <header className="border-b border-[#0f2040] bg-[#070f1e]/50 backdrop-blur-sm sticky top-0 z-50">
                 <div className="max-w-7xl mx-auto px-4 py-4">
                     <div className="flex items-center justify-between">
                         <div className="flex items-center gap-3">
@@ -530,32 +561,32 @@ export default function App() {
                                 onError={e => { e.target.src = "/RLP_Icon.png"; }}
                             />
                             <div>
-                                <h1 className="text-xl font-bold text-white">RLP</h1>
-                                <p className="text-xs text-slate-400">Statistics & Analytics</p>
+                                <h1 className="text-xl font-bold text-white">Raise League Power</h1>
+                                <p className="text-xs text-[#5a8ab0]">Statistics & Analytics</p>
                             </div>
                         </div>
                         <div className="flex items-center gap-3">
                             <div className="relative hidden md:block">
-                                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[#5a8ab0]" />
                                 <Input
-                                    placeholder="NomeSummoner#TAG"
+                                    placeholder="Nome Summoner#TAG"
                                     value={searchQuery}
                                     onChange={e => setSearchQuery(e.target.value)}
                                     onKeyDown={handleSearch}
-                                    className="pl-10 w-64 bg-slate-800 border-slate-700 text-white placeholder:text-slate-500"
+                                    className="pl-10 w-64 bg-[#0d1f38] border-[#1a3558] text-white placeholder:text-[#3a6080]"
                                 />
                             </div>
                             <Button
                                 onClick={handleSearch}
                                 disabled={searching}
-                                className="bg-blue-600 hover:bg-blue-700 text-white"
+                                className="bg-[#1e6fff] hover:bg-[#1459d4] text-white"
                             >
                                 {searching ? "..." : "Search"}
                             </Button>
                             {searchData && (
                                 <Button
                                     onClick={clearSearch}
-                                    className="bg-slate-700 hover:bg-slate-600 text-white text-xs px-3"
+                                    className="bg-[#142545] hover:bg-[#1e3560] text-white text-xs px-3"
                                 >
                                     ✕ Il tuo profilo
                                 </Button>
@@ -568,12 +599,12 @@ export default function App() {
             {/* Banner summoner cercato */}
             {searchData && (
                 <div className="max-w-7xl mx-auto px-4 mt-4">
-                    <div className="p-3 bg-blue-900/50 border border-blue-700 text-blue-200 rounded-lg text-sm flex items-center justify-between">
+                    <div className="p-3 bg-[#0a1e4a]/50 border border-[#1459d4] text-[#a8e4ff] rounded-lg text-sm flex items-center justify-between">
                         <span>
                             Stai visualizzando il profilo di{" "}
                             <strong>{searchData.profile?.gameName}#{searchData.profile?.tagLine}</strong>
                         </span>
-                        <button onClick={clearSearch} className="text-blue-400 hover:text-white text-xs underline">
+                        <button onClick={clearSearch} className="text-[#4fc3f7] hover:text-white text-xs underline">
                             Torna al tuo profilo
                         </button>
                     </div>
@@ -589,38 +620,38 @@ export default function App() {
             {/* Main */}
             <main className="max-w-7xl mx-auto px-4 py-8">
                 <Tabs value={activeTab} onValueChange={handleTabChange} className="space-y-6">
-                    <TabsList className="bg-slate-900 border border-slate-800 p-1">
+                    <TabsList className="bg-[#070f1e] border border-[#0f2040] p-1 rounded-lg">
                         <TabsTrigger
                             value="profile"
-                            className="data-[state=active]:bg-blue-600 data-[state=active]:text-white"
+                            className="data-[state=active]:bg-[#1e6fff] data-[state=active]:text-white"
                         >
                             <User className="w-4 h-4 mr-2" />
                             Profile
                         </TabsTrigger>
                         <TabsTrigger
                             value="matches"
-                            className="data-[state=active]:bg-blue-600 data-[state=active]:text-white"
+                            className="data-[state=active]:bg-[#1e6fff] data-[state=active]:text-white"
                         >
                             <History className="w-4 h-4 mr-2" />
                             Match History
                         </TabsTrigger>
                         <TabsTrigger
                             value="masteries"
-                            className="data-[state=active]:bg-blue-600 data-[state=active]:text-white"
+                            className="data-[state=active]:bg-[#1e6fff] data-[state=active]:text-white"
                         >
                             <Star className="w-4 h-4 mr-2" />
                             Maestrie
                         </TabsTrigger>
                         <TabsTrigger
                             value="meta"
-                            className="data-[state=active]:bg-blue-600 data-[state=active]:text-white"
+                            className="data-[state=active]:bg-[#1e6fff] data-[state=active]:text-white"
                         >
                             <TrendingUp className="w-4 h-4 mr-2" />
                             Champion Stats
                         </TabsTrigger>
                         <TabsTrigger
                             value="tier-list"
-                            className="data-[state=active]:bg-blue-600 data-[state=active]:text-white"
+                            className="data-[state=active]:bg-[#1e6fff] data-[state=active]:text-white"
                         >
                             <BarChart2 className="w-4 h-4 mr-2" />
                             Tier List
@@ -628,7 +659,7 @@ export default function App() {
                         {!searchData && profileData && (
                             <TabsTrigger
                                 value="champ-select"
-                                className="data-[state=active]:bg-blue-600 data-[state=active]:text-white relative"
+                                className="data-[state=active]:bg-[#1e6fff] data-[state=active]:text-white relative"
                             >
                                 <Swords className="w-4 h-4 mr-2" />
                                 Auto Import
@@ -639,7 +670,7 @@ export default function App() {
                         )}
                         <TabsTrigger
                             value="live-game"
-                            className="data-[state=active]:bg-blue-600 data-[state=active]:text-white relative"
+                            className="data-[state=active]:bg-[#1e6fff] data-[state=active]:text-white relative"
                         >
                             <Tv className="w-4 h-4 mr-2" />
                             Live Game
@@ -675,9 +706,9 @@ export default function App() {
                         ) : (
                             <div className="flex flex-col items-center justify-center h-64">
                                 {loading ? (
-                                    <p className="text-slate-400 animate-pulse">Inizializzazione in corso...</p>
+                                    <p className="text-[#5a8ab0] animate-pulse">Inizializzazione in corso...</p>
                                 ) : (
-                                    <p className="text-slate-500">In attesa del client di gioco...</p>
+                                    <p className="text-[#3a6080]">In attesa del client di gioco...</p>
                                 )}
                             </div>
                         )}
@@ -696,7 +727,7 @@ export default function App() {
                                     <Button
                                         onClick={loadMoreSearchMatches}
                                         disabled={loadingMoreSearch}
-                                        className="bg-slate-700 hover:bg-slate-600 text-white px-10"
+                                        className="bg-[#142545] hover:bg-[#1e3560] text-white px-10"
                                     >
                                         {loadingMoreSearch ? "Caricamento..." : "Carica altri 5"}
                                     </Button>
@@ -714,7 +745,7 @@ export default function App() {
                                     <Button
                                         onClick={loadMoreMatches}
                                         disabled={loadingMore}
-                                        className="bg-slate-700 hover:bg-slate-600 text-white px-10"
+                                        className="bg-[#142545] hover:bg-[#1e3560] text-white px-10"
                                     >
                                         {loadingMore ? "Caricamento..." : "Carica altri 5"}
                                     </Button>
@@ -723,9 +754,9 @@ export default function App() {
                         ) : (
                             <div className="flex items-center justify-center h-64">
                                 {loading ? (
-                                    <p className="text-slate-400 animate-pulse">Caricamento partite...</p>
+                                    <p className="text-[#5a8ab0] animate-pulse">Caricamento partite...</p>
                                 ) : (
-                                    <p className="text-slate-500">In attesa del client di gioco...</p>
+                                    <p className="text-[#3a6080]">In attesa del client di gioco...</p>
                                 )}
                             </div>
                         )}
@@ -766,14 +797,23 @@ export default function App() {
                 </Tabs>
             </main>
 
+            {/* Update Banner */}
+            <UpdateBanner
+                status={updateStatus}
+                info={updateInfo}
+                progress={updateProgress}
+                onUpdate={handleUpdate}
+                onDismiss={handleDismissUpdate}
+            />
+
             {/* Footer */}
-            <footer className="border-t border-slate-800 bg-slate-900/50 backdrop-blur-sm mt-16">
+            <footer className="border-t border-[#0f2040] bg-[#070f1e]/50 backdrop-blur-sm mt-16">
                 <div className="max-w-7xl mx-auto px-4 py-6">
                     <div className="flex flex-col md:flex-row items-center justify-between gap-4">
-                        <p className="text-slate-400 text-sm">
+                        <p className="text-[#5a8ab0] text-sm">
                             RLP isn't endorsed by Riot Games and doesn't reflect the views or opinions of Riot Games.
                         </p>
-                        <p className="text-slate-500 text-xs">Patch 14.4 • Updated 2 hours ago</p>
+                        <p className="text-[#3a6080] text-xs">Patch 14.4 • Updated 2 hours ago</p>
                     </div>
                 </div>
             </footer>

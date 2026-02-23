@@ -40,4 +40,8 @@ Riot Games, League of Legends, and all associated properties are trademarks or r
 Build and meta data are sourced from the OP.GG MCP API (github.com/opgginc/opgg-mcp), an official public API published by OP.GG Inc. under the MIT license. RLP Project is not affiliated with or endorsed by OP.GG Inc.
 
 Auto-Updater
+<<<<<<< HEAD
 RLP includes a built-in auto-updater powered by tauri-plugin-updater. On each launch, the app checks for new releases. If an update is available, you will be prompted to install it automatically.
+=======
+RLP includes a built-in auto-updater powered by tauri-plugin-updater. On each launch, the app checks for new releases. If an update is available, you will be prompted to install it automatically.
+>>>>>>> dev

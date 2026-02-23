@@ -7,7 +7,10 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+# Dependencies
 node_modules
+
+# Build output
 dist
 dist-ssr
 *.local
@@ -15,17 +18,27 @@ dist-ssr
 # Secrets
 .env
 .env.local
+.env.*.local
+.env.production
+.env.staging
 .cargo/config.toml
-echo ".cargo/config.toml"
-~/.tauri/
-.tauri/
+
+# Tauri build artifacts
+src-tauri/target/
+src-tauri/gen/
+
+# Release artifacts (generati da release.ps1, non vanno nel repo)
+latest.json
+*.sig
+WixTools/
+
+# Signing / release scripts (uso interno)
 *.key
 *.key.pub
 release.ps1
-latest.json
+UPDATER_SETUP.ps1
 
-
-# Editor directories and files
+# Editor
 .vscode/*
 !.vscode/extensions.json
 .idea
@@ -35,7 +48,4 @@ latest.json
 *.njsproj
 *.sln
 *.sw?
-. v s / 
- 
- .vs/
 .vs/
