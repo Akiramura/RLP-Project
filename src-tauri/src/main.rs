@@ -29,8 +29,18 @@ fn riot_api_key() -> &'static str {
     env!("RIOT_API_KEY")
 }
 
+use std::collections::HashSet;
+use tokio::sync::RwLock;
+
 // OnceCell stores Option<Pool> so we never retry a failed init
 static POOL: OnceCell<Option<Pool>> = OnceCell::const_new();
+
+/// Match ID già identificati come pre-Season 2026: saltati senza chiamare Riot API né Neon.
+static PRE2026_SKIP: OnceCell<RwLock<HashSet<String>>> = OnceCell::const_new();
+
+async fn pre2026_skip() -> &'static RwLock<HashSet<String>> {
+    PRE2026_SKIP.get_or_init(|| async { RwLock::new(HashSet::new()) }).await
+}
 
 async fn get_pool() -> Option<&'static Pool> {
     POOL.get_or_init(|| async {
@@ -85,6 +95,35 @@ async fn get_pool() -> Option<&'static Pool> {
     }).await.as_ref()
 }
 
+// ── Season filter ────────────────────────────────────────────────────────────
+
+/// Filtra un array JSON di match tenendo solo quelli Season 2026+ e non-custom.
+/// gameCreation è in millisecondi (Riot API), SEASON_2026_START_SECS è in secondi.
+fn filter_season_matches(matches: Value) -> Value {
+    const SEASON_2026_START_MS: u64 = 1_767_830_400 * 1000;
+    match matches.as_array() {
+        None => matches,
+        Some(arr) => {
+            let filtered: Vec<Value> = arr.iter().filter(|m| {
+                // Filtro data: solo Season 2026+
+                let gc = m["info"]["gameCreation"].as_u64()
+                    .or_else(|| m["gameCreation"].as_u64())
+                    .unwrap_or(u64::MAX);
+                if gc < SEASON_2026_START_MS { return false; }
+
+                // Filtro tipo: escludi custom (queueId == 0)
+                let queue_id = m["info"]["queueId"].as_u64()
+                    .or_else(|| m["queueId"].as_u64())
+                    .unwrap_or(1); // se mancante, teniamo il match
+                if queue_id == 0 { return false; }
+
+                true
+            }).cloned().collect();
+            json!(filtered)
+        }
+    }
+}
+
 // ── DB helpers ───────────────────────────────────────────────────────────────
 
 async fn db_get_match(match_id: &str) -> Option<Value> {
@@ -110,6 +149,18 @@ async fn db_save_match(match_id: &str, data: &Value) {
     ).await;
 }
 
+async fn db_delete_match(match_id: &str) {
+    let pool: &Pool = match get_pool().await { Some(p) => p, None => return };
+    let pg = match pool.get().await {
+        Ok(c)  => c,
+        Err(e) => { eprintln!("❌ db_delete_match pool: {}", e); return; }
+    };
+    match pg.execute("DELETE FROM match_cache WHERE match_id = $1", &[&match_id]).await {
+        Ok(n)  => if n > 0 { println!("🗑 Rimosso da Neon match pre-2026: {}", match_id); },
+        Err(e) => eprintln!("❌ db_delete_match {}: {}", match_id, e),
+    }
+}
+
 async fn db_get_summoner(puuid: &str) -> Option<Value> {
     let pool: &Pool = get_pool().await?;
     let pg = pool.get().await
@@ -131,6 +182,15 @@ async fn db_get_summoner(puuid: &str) -> Option<Value> {
     let profile: Value        = serde_json::from_str(&row.get::<_, String>(0)).ok()?;
     let ranked_entries: Value = serde_json::from_str(&row.get::<_, String>(1)).ok()?;
     let matches: Value        = serde_json::from_str(&row.get::<_, String>(2)).ok()?;
+
+    // Filtra solo partite Season 2026 (gameCreation >= 1767830400000 ms)
+    let matches = filter_season_matches(matches);
+
+    // Se dopo il filtro non restano partite, la cache è obsoleta → forza refetch
+    if matches.as_array().map(|a| a.is_empty()).unwrap_or(true) {
+        println!("Cache summoner {} contiene solo partite pre-Season 2026, invalido.", puuid);
+        return None;
+    }
 
     Some(json!({
         "puuid": puuid,
@@ -159,6 +219,14 @@ async fn db_get_summoner_offline(puuid: &str) -> Option<Value> {
     let profile: Value        = serde_json::from_str(&row.get::<_, String>(0)).ok()?;
     let ranked_entries: Value = serde_json::from_str(&row.get::<_, String>(1)).ok()?;
     let matches: Value        = serde_json::from_str(&row.get::<_, String>(2)).ok()?;
+
+    // Filtra solo partite Season 2026
+    let matches = filter_season_matches(matches);
+
+    // Offline: mantieni anche cache vuota (meglio che niente), ma logga
+    if matches.as_array().map(|a| a.is_empty()).unwrap_or(true) {
+        println!("[Offline] Cache {} contiene solo partite pre-Season 2026.", puuid);
+    }
 
     Some(json!({
         "puuid": puuid,
@@ -406,10 +474,19 @@ async fn fetch_puuid(game_name: &str, tag_line: &str, client: &Client) -> Option
 }
 
 async fn fetch_match_ids(puuid: &str, start: u32, count: u32, client: &Client) -> Vec<String> {
-    let url = format!(
+    fetch_match_ids_since(puuid, start, count, None, client).await
+}
+
+const SEASON_2026_START_SECS: u64 = 1_767_830_400; // 2026-01-08 00:00:00 UTC
+
+async fn fetch_match_ids_since(puuid: &str, start: u32, count: u32, start_time: Option<u64>, client: &Client) -> Vec<String> {
+    let mut url = format!(
         "https://europe.api.riotgames.com/lol/match/v5/matches/by-puuid/{}/ids?start={}&count={}",
         puuid, start, count
     );
+    if let Some(ts) = start_time {
+        url.push_str(&format!("&startTime={}", ts));
+    }
     for attempt in 0..3u32 {
         match client.get(&url).header("X-Riot-Token", riot_api_key()).send().await {
             Ok(res) => {
@@ -428,10 +505,32 @@ async fn fetch_match_ids(puuid: &str, start: u32, count: u32, client: &Client) -
 }
 
 async fn fetch_match_detail(match_id: &str, client: &Client) -> Value {
+    const SEASON_2026_START_MS: u64 = 1_767_830_400 * 1000; // 2026-01-08 00:00:00 UTC
+
+    // Controllo fast-path: già identificato come pre-2026 in questa sessione
+    {
+        let skip = pre2026_skip().await.read().await;
+        if skip.contains(match_id) {
+            return json!({});
+        }
+    }
+
     if let Some(cached) = db_get_match(match_id).await {
+        let gc = cached["info"]["gameCreation"].as_u64()
+            .or_else(|| cached["gameCreation"].as_u64())
+            .unwrap_or(u64::MAX);
+        if gc < SEASON_2026_START_MS {
+            println!("🗑 Neon match pre-2026 (gc={}), cancello: {}", gc, match_id);
+            db_delete_match(match_id).await;
+            // Aggiunge al set in-memory per evitare doppie chiamate
+            pre2026_skip().await.write().await.insert(match_id.to_string());
+            return json!({});
+        }
         println!("✓ Cache hit Neon: {}", match_id);
         return cached;
     }
+
+    // Non in Neon: fetcha da Riot API. Se la data risulta pre-2026, non salvare.
     let url = format!("https://europe.api.riotgames.com/lol/match/v5/matches/{}", match_id);
     for attempt in 0..3u32 {
         match client.get(&url).header("X-Riot-Token", riot_api_key()).send().await {
@@ -444,6 +543,12 @@ async fn fetch_match_detail(match_id: &str, client: &Client) -> Value {
                 }
                 let data = res.json::<Value>().await.unwrap_or(json!({}));
                 if data.get("metadata").is_some() {
+                    let gc = data["info"]["gameCreation"].as_u64().unwrap_or(u64::MAX);
+                    if gc < SEASON_2026_START_MS {
+                        println!("🗑 Riot API match pre-2026 (gc={}), scarto: {}", gc, match_id);
+                        pre2026_skip().await.write().await.insert(match_id.to_string());
+                        return json!({});
+                    }
                     db_save_match(match_id, &data).await;
                 }
                 return data;
@@ -572,8 +677,22 @@ async fn get_profiles(handle: AppHandle) -> Result<Value, String> {
             .unwrap_or(false);
 
         if cached_puuid == puuid && !puuid.is_empty() && matches_are_objects && cache_is_fresh {
-            println!("[RLP] Cache locale valida (< 30 min).");
-            return Ok(cache.clone());
+            let mut cached = cache.clone();
+            // Filtra match pre-season anche dalla cache locale
+            if let Some(matches) = cached.get("matches").cloned() {
+                let filtered = filter_season_matches(matches);
+                // Se non restano partite Season 2026, la cache è obsoleta → rifresca
+                if filtered.as_array().map(|a| a.is_empty()).unwrap_or(true) {
+                    println!("[RLP] Cache locale contiene solo partite pre-Season 2026, invalido.");
+                } else {
+                    cached["matches"] = filtered;
+                    println!("[RLP] Cache locale valida (< 30 min).");
+                    return Ok(cached);
+                }
+            } else {
+                println!("[RLP] Cache locale valida (< 30 min).");
+                return Ok(cached);
+            }
         } else if cached_puuid == puuid && !cache_is_fresh {
             println!("[RLP] Cache locale scaduta, rifresco da LCU.");
         }
@@ -585,10 +704,14 @@ async fn get_profiles(handle: AppHandle) -> Result<Value, String> {
         .send().await.map_err(|e| e.to_string())?
         .json().await.map_err(|_| "Errore JSON Rank")?;
 
-    let match_ids = fetch_match_ids(&puuid, 0, 10, &client).await;
+    let match_ids = fetch_match_ids_since(&puuid, 0, 20, Some(SEASON_2026_START_SECS), &client).await;
     let mut match_details: Vec<Value> = vec![];
     for id in match_ids.iter() {
-        match_details.push(fetch_match_detail(id, &client).await);
+        let detail = fetch_match_detail(id, &client).await;
+        // Salta match vuoti (pre-2026 cancellati da Neon) e custom (queueId == 0)
+        if detail.get("metadata").is_none() { continue; }
+        let queue_id = detail["info"]["queueId"].as_u64().unwrap_or(1);
+        if queue_id != 0 { match_details.push(detail); }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 
@@ -603,12 +726,22 @@ async fn get_profiles(handle: AppHandle) -> Result<Value, String> {
 #[tauri::command]
 async fn get_more_matches(puuid: String, start: u32) -> Result<Value, String> {
     let client    = Client::builder().danger_accept_invalid_certs(true).build().unwrap();
-    let match_ids = fetch_match_ids(&puuid, start, 5, &client).await;
+    let match_ids = fetch_match_ids_since(&puuid, start, 10, Some(SEASON_2026_START_SECS), &client).await;
     let mut details: Vec<Value> = vec![];
     for id in match_ids.iter() {
         println!("Fetching extra match: {}", id);
-        details.push(fetch_match_detail(id, &client).await);
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let detail = fetch_match_detail(id, &client).await;
+        // Salta match vuoti (pre-2026 cancellati da Neon)
+        if detail.get("metadata").is_none() { continue; }
+        // Salta partite custom (queueId == 0)
+        let queue_id = detail["info"]["queueId"].as_u64().unwrap_or(1);
+        if queue_id == 0 { continue; }
+        // Salta partite pre-Season 2026 (doppio controllo lato dettaglio)
+        const SEASON_2026_START_MS: u64 = 1_767_830_400 * 1000;
+        let gc = detail["info"]["gameCreation"].as_u64().unwrap_or(u64::MAX);
+        if gc < SEASON_2026_START_MS { continue; }
+        details.push(detail);
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     }
     Ok(json!(details))
 }
@@ -644,10 +777,13 @@ async fn search_summoner(game_name: String, tag_line: String) -> Result<Value, S
         .send().await.map_err(|e| e.to_string())?
         .json().await.unwrap_or(json!({}));
 
-    let match_ids = fetch_match_ids(&puuid, 0, 10, &client).await;
+    let match_ids = fetch_match_ids_since(&puuid, 0, 20, Some(SEASON_2026_START_SECS), &client).await;
     let mut match_details: Vec<Value> = vec![];
     for id in match_ids.iter() {
-        match_details.push(fetch_match_detail(id, &client).await);
+        let detail = fetch_match_detail(id, &client).await;
+        if detail.get("metadata").is_none() { continue; }
+        let queue_id = detail["info"]["queueId"].as_u64().unwrap_or(1);
+        if queue_id != 0 { match_details.push(detail); }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 
@@ -1052,6 +1188,21 @@ async fn get_opgg_matches(summoner_id: String, region: String, limit: u32) -> Re
     }).collect();
 
     eprintln!("[get_opgg_matches] {} partite restituite per {}", matches.len(), summoner_id);
+
+    // Filtra solo partite Season 2026 — created_at è ISO string "2026-01-15T..."
+    let season_start = chrono::DateTime::parse_from_rfc3339("2026-01-08T00:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+
+    let matches: Vec<Value> = matches.into_iter().filter(|m| {
+        let created_at = m["gameCreation"].as_str().unwrap_or("");
+        if created_at.is_empty() { return true; } // se mancante, teniamo
+        chrono::DateTime::parse_from_rfc3339(created_at)
+            .map(|dt| dt.with_timezone(&chrono::Utc) >= season_start)
+            .unwrap_or(true)
+    }).collect();
+
+    eprintln!("[get_opgg_matches] {} partite dopo filtro Season 2026", matches.len());
     Ok(json!(matches))
 }
 
@@ -1566,6 +1717,42 @@ async fn get_summoner_masteries(puuid: String) -> Result<Value, String> {
     Ok(masteries)
 }
 
+/// Recupera la timeline di un match per mostrare gli acquisti item per minuto.
+#[tauri::command]
+async fn get_match_timeline(match_id: String) -> Result<Value, String> {
+    let client = Client::builder()
+        .danger_accept_invalid_certs(true)
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap();
+
+    let url = format!(
+        "https://europe.api.riotgames.com/lol/match/v5/matches/{}/timeline",
+        match_id
+    );
+
+    for attempt in 0..3u32 {
+        let res = client
+            .get(&url)
+            .header("X-Riot-Token", riot_api_key())
+            .send().await
+            .map_err(|e| e.to_string())?;
+
+        let status = res.status().as_u16();
+        if status == 429 {
+            let wait = 2000 * (attempt + 1) as u64;
+            tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
+            continue;
+        }
+        if status != 200 {
+            return Err(format!("Riot API timeline error {}", status));
+        }
+        let data: Value = res.json().await.map_err(|_| "Errore JSON timeline")?;
+        return Ok(data);
+    }
+    Err("Timeline fetch fallita dopo 3 tentativi".into())
+}
+
 fn main() {
 
     tauri::Builder::default()
@@ -1574,7 +1761,7 @@ fn main() {
             get_profiles, get_more_matches, search_summoner, get_opgg_data,
             get_champ_select_session, auto_import_build, list_opgg_tools,
             debug_champ_select_slot, get_tier_list, get_opgg_matches, get_rlp_matches,
-            get_live_game, check_live_game, get_summoner_masteries
+            get_live_game, check_live_game, get_summoner_masteries, get_match_timeline
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

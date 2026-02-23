@@ -1,9 +1,9 @@
-import { useState, useMemo } from "react";
+import { useMemo } from "react";
 import { Card } from "./ui/card";
 import { Badge } from "./ui/badge";
-import { TrendingUp, Swords, Trophy, Target, Zap, AlertTriangle, Filter } from "lucide-react";
+import { TrendingUp, Swords, Trophy, Target, Zap, AlertTriangle } from "lucide-react";
 import { PATCH } from "./constants";
-import { resolveMe } from "./match-history-tab";
+import { resolveMe, SEASON_2026_START_MS } from "./utils";
 
 // Patch 14.24 iniziata il 27 Novembre 2024, 14.1 (Season 2025) il 8 Gennaio 2025
 const PATCH_SCHEDULE = [
@@ -33,15 +33,7 @@ const PATCH_SCHEDULE = [
     { patch: "26.24", from: new Date("2026-12-09T00:00:00Z").getTime(), to: Infinity },
 ];
 
-// Determina la patch corrente automaticamente
-const now = Date.now();
-const currentPatch = PATCH_SCHEDULE.find(p => now >= p.from && now < p.to) || PATCH_SCHEDULE[0];
 
-const FILTER_OPTIONS = [
-    { label: "Season 2026", key: "season", from: new Date("2026-01-08T00:00:00Z").getTime() },
-    { label: `Patch ${currentPatch.patch}`, key: "patch", from: currentPatch.from, to: currentPatch.to },
-    { label: "Tutte le partite", key: "all", from: 0 },
-];
 
 const META_DATA = {
     "Ahri": { tier: "S+", metaWR: 52.40, metaGames: 31360 },
@@ -231,27 +223,21 @@ function normalizeChampName(name) {
 }
 
 export function ChampionMetaTab({ matches, seasonFetchDone, metaData, myPuuid, mySummonerName }) {
-    // Usa metaData prop (dati live da OP.GG) se disponibile, altrimenti fallback su META_DATA statico
     const activeMetaData = (metaData && Object.keys(metaData).length > 0) ? metaData : META_DATA;
-    const [filterKey, setFilterKey] = useState("all");
 
-    // Normalizza i match raw in formato flat usando resolveMe
     const resolvedMatches = useMemo(() => {
         if (!matches) return [];
         return matches.map(m => resolveMe(m, myPuuid, mySummonerName)).filter(Boolean);
     }, [matches, myPuuid, mySummonerName]);
 
-    // Filtra i match in base al periodo selezionato
+    // Solo partite Season 2026
     const filteredMatches = useMemo(() => {
-        const opt = FILTER_OPTIONS.find(o => o.key === filterKey);
-        if (!opt || opt.key === "all") return resolvedMatches;
         return resolvedMatches.filter(m => {
             const ts = m.gameCreation;
             if (!ts) return true;
-            if (opt.to) return ts >= opt.from && ts <= opt.to;
-            return ts >= opt.from;
+            return ts >= SEASON_2026_START_MS;
         });
-    }, [resolvedMatches, filterKey]);
+    }, [resolvedMatches]);
 
     if (!matches || matches.length === 0) {
         return (
@@ -267,26 +253,9 @@ export function ChampionMetaTab({ matches, seasonFetchDone, metaData, myPuuid, m
     if (filteredMatches.length === 0) {
         return (
             <div className="flex flex-col gap-4">
-                {/* Filtri visibili anche quando vuoto */}
-                <div className="flex gap-2 flex-wrap">
-                    {FILTER_OPTIONS.map(opt => (
-                        <button
-                            key={opt.key}
-                            onClick={() => setFilterKey(opt.key)}
-                            className={`px-3 py-1 rounded-full text-xs font-semibold transition-colors ${filterKey === opt.key ? "bg-[#1e6fff] text-white" : "bg-[#0d1f38] text-[#5a8ab0] hover:bg-[#142545]"}`}
-                        >
-                            {opt.label}
-                        </button>
-                    ))}
-                </div>
                 <div className="flex items-center justify-center h-48 flex-col gap-3">
-                    <p className="text-[#5a8ab0]">Nessuna partita nel periodo selezionato.</p>
-                    <button
-                        onClick={() => setFilterKey("all")}
-                        className="text-[#4fc3f7] text-xs underline hover:text-[#7dd8ff]"
-                    >
-                        Mostra tutte le partite
-                    </button>
+                    <p className="text-[#5a8ab0]">Nessuna partita Season 2026 trovata.</p>
+                    <p className="text-[#3a6080] text-xs">Le partite pre-2026 non vengono conteggiate.</p>
                 </div>
             </div>
         );
@@ -341,7 +310,7 @@ export function ChampionMetaTab({ matches, seasonFetchDone, metaData, myPuuid, m
     const overPerformers = champList.filter(c => c.games >= 3 && c.diff !== null && c.diff >= 3);
     const underPerformers = champList.filter(c => c.games >= 3 && c.diff !== null && c.diff <= -3);
 
-    const activeLabel = FILTER_OPTIONS.find(o => o.key === filterKey)?.label;
+    const activeLabel = "Season 2026";
 
     return (
         <div className="space-y-6">
@@ -358,36 +327,19 @@ export function ChampionMetaTab({ matches, seasonFetchDone, metaData, myPuuid, m
                 </div>
             )}
 
-            {/* Header con dropdown filtro */}
+            {/* Header */}
             <div className="flex items-center justify-between flex-wrap gap-3">
                 <h2 className="text-xl font-bold text-white">Le tue statistiche</h2>
-                <div className="flex items-center gap-3">
-                    {/* Dropdown periodo */}
-                    <div className="flex items-center gap-2 bg-[#070f1e] border border-[#1a3558] rounded-lg px-3 py-1.5">
-                        <Filter className="w-3.5 h-3.5 text-[#5a8ab0]" />
-                        <select
-                            value={filterKey}
-                            onChange={e => setFilterKey(e.target.value)}
-                            className="bg-transparent text-[#b8d4e8] text-sm focus:outline-none cursor-pointer"
-                        >
-                            {FILTER_OPTIONS.map(o => (
-                                <option key={o.key} value={o.key} className="bg-[#0d1f38]">
-                                    {o.label}
-                                </option>
-                            ))}
-                        </select>
-                    </div>
-                    <Badge className="bg-[#142545] text-[#8ab0cc] text-xs">
-                        {totalGames} partite
-                    </Badge>
-                </div>
+                <Badge className="bg-[#142545] text-[#8ab0cc] text-xs">
+                    {totalGames} partite
+                </Badge>
             </div>
 
             {/* Avviso se filtro azzera i match */}
             {totalGames === 0 && (
                 <div className="p-4 bg-[#0d1f38] border border-[#1a3558] rounded-lg text-center">
-                    <p className="text-[#5a8ab0] text-sm">Nessuna partita trovata per <span className="text-white font-semibold">{activeLabel}</span>.</p>
-                    <p className="text-[#3a6080] text-xs mt-1">Prova a caricare più partite o seleziona un periodo diverso.</p>
+                    <p className="text-[#5a8ab0] text-sm">Nessuna partita Season 2026 trovata.</p>
+                    <p className="text-[#3a6080] text-xs mt-1">Le partite pre-2026 non vengono conteggiate.</p>
                 </div>
             )}
 
