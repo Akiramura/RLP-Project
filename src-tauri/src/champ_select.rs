@@ -197,6 +197,12 @@ impl LcuClient {
             .header("Authorization", format!("Basic {}", self.auth))
             .json(body).send().await.ok()?.json().await.ok()
     }
+    async fn post_status(&self, path: &str, body: &Value) -> Result<u16, String> {
+        let resp = self.client.post(&format!("https://127.0.0.1:{}{}", self.port, path))
+            .header("Authorization", format!("Basic {}", self.auth))
+            .json(body).send().await.map_err(|e| e.to_string())?;
+        Ok(resp.status().as_u16())
+    }
 }
 
 async fn mcp_extract_text(text: &str) -> Option<String> {
@@ -228,23 +234,19 @@ async fn opgg_get_champion_build(champion_name: &str, position: &str, game_mode:
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
         .build().map_err(|e| e.to_string())?;
 
-    // OP.GG richiede sempre il campo position — per ARAM/URF usiamo "mid" come fallback
-    // (l'API non accetta stringa vuota né "none", ma ignora la posizione se game_mode=aram/urf)
-    let pos = match position.to_uppercase().as_str() {
+    // Per ranked usiamo la lane reale. Per ARAM/URF proviamo i valori accettati dall'API in ordine.
+    let pos_ranked = match position.to_uppercase().as_str() {
         "TOP"                     => "top",
         "JUNGLE"                  => "jungle",
         "MIDDLE"|"MID"            => "mid",
         "BOTTOM"|"BOT"|"ADC"      => "adc",
         "SUPPORT"|"UTILITY"       => "support",
-        _                         => "mid",  // DEFAULT, ARAM, URF → mid come placeholder
+        _                         => "mid",
     };
-
-    // game_mode OP.GG: "ranked" | "aram" | "urf"
-    let opgg_mode = match game_mode {
-        "aram"   => "aram",
-        "urf"    => "urf",
-        _        => "ranked",
-    };
+    // Per URF/ARAM l'API OP.GG ha un bug: non accetta nessun valore di position
+    // con game_mode=urf/aram. Workaround: usiamo sempre game_mode=ranked + posizione reale.
+    // L'item set sarà comunque utile perché gli item in URF sono gli stessi di ranked.
+    let opgg_mode = "ranked"; // sempre ranked — workaround bug API OP.GG
     let champ_upper = champion_name.to_uppercase();
     const MCP_URL: &str = "https://mcp-api.op.gg/mcp";
 
@@ -266,35 +268,38 @@ async fn opgg_get_champion_build(champion_name: &str, position: &str, game_mode:
         let _ = r.json(&json!({"jsonrpc":"2.0","method":"notifications/initialized"})).send().await;
     }
 
+    // Costruisce gli arguments e invia la request, con retry per trovare il valore position corretto
+    let desired_fields = json!([
+        "data.summoner_spells.{ids,ids_names}",
+        "data.runes.{primary_page_id,primary_page_name,primary_rune_ids,secondary_page_id,secondary_page_name,secondary_rune_ids,stat_mod_ids}",
+        "data.starter_items[].{ids,ids_names}",
+        "data.core_items[].{ids,ids_names}",
+        "data.last_items[].{ids,ids_names}",
+        "data.fourth_items[].{ids,ids_names}",
+        "data.fifth_items[].{ids,ids_names}",
+        "data.sixth_items[].{ids,ids_names}",
+        "data.boots[].{ids,ids_names}",
+        "data.skills.{order}",
+        "data.mythic_items[].{ids,ids_names}"
+    ]);
+
     let mut req = client.post(MCP_URL)
         .header("Content-Type","application/json")
         .header("Accept","application/json, text/event-stream");
     if let Some(ref sid) = session_id { req = req.header("mcp-session-id", sid.as_str()); }
 
+    eprintln!("[RLP] MCP attempt: champion={} game_mode=ranked position={}", champ_upper, pos_ranked);
+
+    let mut args = serde_json::Map::new();
+    args.insert("champion".to_string(), json!(champ_upper));
+    args.insert("game_mode".to_string(), json!(opgg_mode));
+    args.insert("position".to_string(), json!(pos_ranked));
+    args.insert("lang".to_string(), json!("en_US"));
+    args.insert("desired_output_fields".to_string(), desired_fields.clone());
+
     let res = req.json(&json!({
         "jsonrpc":"2.0","id":2,"method":"tools/call",
-        "params":{
-            "name":"lol_get_champion_analysis",
-            "arguments":{
-                "champion": champ_upper,
-                "game_mode": opgg_mode,
-                "position": pos,
-                "lang": "en_US",
-                "desired_output_fields": [
-                    "data.summoner_spells.{ids,ids_names}",
-                    "data.runes.{primary_page_id,primary_page_name,primary_rune_ids,secondary_page_id,secondary_page_name,secondary_rune_ids,stat_mod_ids}",
-                    "data.starter_items[].{ids,ids_names}",
-                    "data.core_items[].{ids,ids_names}",
-                    "data.last_items[].{ids,ids_names}",
-                    "data.fourth_items[].{ids,ids_names}",
-                    "data.fifth_items[].{ids,ids_names}",
-                    "data.sixth_items[].{ids,ids_names}",
-                    "data.boots[].{ids,ids_names}",
-                    "data.skills.{order}",
-                    "data.mythic_items[].{ids,ids_names}"
-                ]
-            }
-        }
+        "params":{"name":"lol_get_champion_analysis","arguments": Value::Object(args)}
     })).send().await.map_err(|e| format!("HTTP error: {}", e))?;
 
     let text = res.text().await.map_err(|e| e.to_string())?;
@@ -305,8 +310,23 @@ async fn opgg_get_champion_build(champion_name: &str, position: &str, game_mode:
         }
     }
 
-    let text_content = mcp_extract_text(&text).await
-        .ok_or_else(|| format!("No text in MCP response"))?;
+    let mut text_content = String::new();
+    let last_err;
+    match mcp_extract_text(&text).await {
+        Some(tc) => {
+            eprintln!("[RLP] MCP success pos={}", pos_ranked);
+            text_content = tc;
+            last_err = String::new();
+        }
+        None => {
+            last_err = format!("No text in MCP response (pos={})", pos_ranked);
+            eprintln!("[RLP] {}", last_err);
+        }
+    }
+
+    if text_content.is_empty() {
+        return Err(if last_err.is_empty() { "Risposta MCP vuota".to_string() } else { last_err });
+    }
 
     // Log full text_content in chunks
     let mut _off = 0;
@@ -630,12 +650,17 @@ async fn import_runes(lcu: &LcuClient, champion: &str, position: &str, build: &V
     perks.extend_from_slice(&sub_ids);
     perks.extend_from_slice(&stat_ids);
     
-    let resp = lcu.post("/lol-perks/v1/pages", &json!({
+    // Usa post_status invece di post: il LCU in URF/ARAM risponde con body vuoto (non JSON),
+    // quindi controllare solo lo status code HTTP è l'unico modo affidabile.
+    let status = lcu.post_status("/lol-perks/v1/pages", &json!({
         "name": page_name, "primaryStyleId": primary_id, "subStyleId": sub_id,
         "selectedPerkIds": perks, "current": true
-    })).await;
-    
-    if resp.is_none() { return Err("Il client ha rifiutato la pagina (possibile Rune ID non valido)".to_string()); }
+    })).await.map_err(|e| format!("HTTP error rune page: {}", e))?;
+
+    eprintln!("[RLP] import_runes POST status={}", status);
+    if status < 200 || status >= 300 {
+        return Err(format!("Il client ha rifiutato la pagina rune (HTTP {})", status));
+    }
     Ok((page_name, primary_path_name.to_string()))
 }
 
@@ -653,7 +678,7 @@ async fn import_summoners(lcu: &LcuClient, build: &Value) -> Result<Vec<String>,
     if resp.status().is_success() { Ok(spell_names) } else { Err("Il client ha rifiutato il cambio spell".to_string()) }
 }
 
-async fn import_item_set(_lcu: &LcuClient, champion: &str, position: &str, build: &Value, _puuid: &str) -> Result<usize,String> {
+async fn import_item_set(_lcu: &LcuClient, champion: &str, position: &str, build: &Value, _puuid: &str, label_override: Option<&str>) -> Result<usize,String> {
     let mut blocks: Vec<Value> = Vec::new();
 
     let skill_order = build.pointer("/data/skill_order")
@@ -711,8 +736,9 @@ async fn import_item_set(_lcu: &LcuClient, champion: &str, position: &str, build
     if blocks.is_empty() { return Err("Nessun item trovato".to_string()); }
     let count = blocks.len();
 
+    let set_title = label_override.map(String::from).unwrap_or_else(|| format!("RLP {} {}", champion, position));
     let item_set = json!({
-        "title": format!("RLP {} {}", champion, position),
+        "title": set_title,
         "type": "custom",
         "map": "any",
         "mode": "any",
@@ -728,12 +754,49 @@ async fn import_item_set(_lcu: &LcuClient, champion: &str, position: &str, build
         .join("Recommended");
 
     fs::create_dir_all(&config_path).map_err(|e| format!("mkdir error: {}", e))?;
-    let file_path = config_path.join("RLP.json");
+    let filename = label_override
+        .map(|l| format!("RLP_{}.json", l.replace(' ', "_").replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_")))
+        .unwrap_or_else(|| "RLP.json".to_string());
+    let file_path = config_path.join(&filename);
     let json_str = serde_json::to_string_pretty(&item_set).map_err(|e| e.to_string())?;
     fs::write(&file_path, &json_str).map_err(|e| format!("write error: {}", e))?;
 
     eprintln!("[RLP] item-set written: {:?} ({} blocks)", file_path, count);
     Ok(count)
+}
+
+/// Per URF/ARAM: fetch parallelo delle build per le 4 lane principali usando ranked come workaround.
+/// Restituisce un Vec<(lane_label, build_value)> per le lane che hanno risposto con successo.
+async fn opgg_get_builds_multi_lane(champion_name: &str) -> Vec<(String, Value)> {
+    let lanes = [
+        ("MID",     "mid"),
+        ("TOP",     "top"),
+        ("JUNGLE",  "jungle"),
+        ("ADC",     "adc"),
+        ("SUPPORT", "support"),
+    ];
+
+    let mut handles = Vec::new();
+    for (label, pos) in &lanes {
+        let champ = champion_name.to_string();
+        let label = label.to_string();
+        let pos   = pos.to_string();
+        handles.push(tokio::spawn(async move {
+            match opgg_get_champion_build(&champ, &pos, "ranked").await {
+                Ok(build) => Some((label, build)),
+                Err(e) => {
+                    eprintln!("[RLP] multi-lane {} fetch failed: {}", pos, e);
+                    None
+                }
+            }
+        }));
+    }
+
+    let mut results = Vec::new();
+    for h in handles {
+        if let Ok(Some(pair)) = h.await { results.push(pair); }
+    }
+    results
 }
 
 #[tauri::command]
@@ -836,34 +899,73 @@ pub async fn auto_import_build(champion_name: String, assigned_position: String,
         _        => &assigned_position,
     };
     
-    let build = match opgg_get_champion_build(&champion_name, &assigned_position, mode).await {
-        Ok(b) => b,
-        Err(e) => { result.errors.push(format!("OP.GG fetch fallito: {}", e)); return Ok(result); }
-    };
-    
     let summoner: Value = lcu.get("/lol-summoner/v1/current-summoner").await.unwrap_or(json!({}));
     let puuid = summoner["puuid"].as_str().unwrap_or("").to_string();
     eprintln!("[RLP] summoner puuid={}", puuid);
-    
-    match import_runes(&lcu, &champion_name, mode_label, &build).await {
-        Ok((name,path)) => { result.runes_imported=true; result.rune_page_name=Some(name); result.primary_path=Some(path); }
-        Err(e) => result.errors.push(format!("Rune: {}", e)),
-    }
-    
-    // In ARAM e URF il client non permette di cambiare i summoner spell via LCU → skip silenzioso
-    if mode == "ranked" {
+
+    if mode == "ranked" || mode == "flex" {
+        // ── RANKED / FLEX: build singola per la lane assegnata ────────────────
+        let build = match opgg_get_champion_build(&champion_name, &assigned_position, mode).await {
+            Ok(b) => b,
+            Err(e) => { result.errors.push(format!("OP.GG fetch fallito: {}", e)); return Ok(result); }
+        };
+
+        match import_runes(&lcu, &champion_name, mode_label, &build).await {
+            Ok((name,path)) => { result.runes_imported=true; result.rune_page_name=Some(name); result.primary_path=Some(path); }
+            Err(e) => result.errors.push(format!("Rune: {}", e)),
+        }
         match import_summoners(&lcu, &build).await {
             Ok(spells) => { result.summoners_imported=true; result.summoner_spells=spells; }
             Err(e) => result.errors.push(format!("Summoners: {}", e)),
         }
+        match import_item_set(&lcu, &champion_name, mode_label, &build, &puuid, None).await {
+            Ok(blocks) => { result.items_imported=true; result.item_blocks=Some(blocks); }
+            Err(e) => result.errors.push(format!("Item set: {}", e)),
+        }
     } else {
+        // ── URF / ARAM / altre modalità: fetch parallelo per tutte le lane ────
+        // L'API OP.GG non accetta game_mode=urf/aram; usiamo ranked come workaround.
+        eprintln!("[RLP] mode={} → multi-lane fetch", mode);
+        let lane_builds = opgg_get_builds_multi_lane(&champion_name).await;
+
+        if lane_builds.is_empty() {
+            result.errors.push("Nessuna build multi-lane disponibile".to_string());
+            return Ok(result);
+        }
+
+        // Rune: usiamo la build MID (prima dell'array, o la prima disponibile)
+        let rune_build = lane_builds.iter()
+            .find(|(l, _)| l == "MID")
+            .or_else(|| lane_builds.first());
+        if let Some((rune_lane, build)) = rune_build {
+            let rune_label = format!("{} {}", mode_label, rune_lane);
+            match import_runes(&lcu, &champion_name, &rune_label, build).await {
+                Ok((name,path)) => { result.runes_imported=true; result.rune_page_name=Some(name); result.primary_path=Some(path); }
+                Err(e) => result.errors.push(format!("Rune: {}", e)),
+            }
+        }
+
+        // Summoner spells: skip in modalità non-ranked (LCU non lo permette)
+        result.summoners_imported = true;
         eprintln!("[RLP] Summoner spells skip (mode={})", mode);
-        result.summoners_imported = true; // non è un errore, è expected
-    }
-    
-    match import_item_set(&lcu, &champion_name, mode_label, &build, &puuid).await {
-        Ok(blocks) => { result.items_imported=true; result.item_blocks=Some(blocks); }
-        Err(e) => result.errors.push(format!("Item set: {}", e)),
+
+        // Item set: uno per ogni lane riuscita
+        let mut total_blocks = 0usize;
+        let mut item_errors = Vec::new();
+        for (lane_label, build) in &lane_builds {
+            let set_label = format!("RLP {} {} {}", champion_name, mode_label, lane_label);
+            match import_item_set(&lcu, &champion_name, lane_label, build, &puuid, Some(&set_label)).await {
+                Ok(blocks) => { total_blocks += blocks; }
+                Err(e) => { item_errors.push(format!("{}: {}", lane_label, e)); }
+            }
+        }
+        if total_blocks > 0 {
+            result.items_imported = true;
+            result.item_blocks = Some(total_blocks);
+        }
+        if !item_errors.is_empty() {
+            result.errors.push(format!("Item set parziale: {}", item_errors.join("; ")));
+        }
     }
 
     if !result.errors.is_empty() {
