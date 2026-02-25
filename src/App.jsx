@@ -142,6 +142,7 @@ export default function App() {
     const [loadingMoreSearch, setLoadingMoreSearch] = useState(false);
 
     const [activeTab, setActiveTab] = useState("profile");
+    const searchAbortRef = useRef(null);
     const [isInChampSelect, setIsInChampSelect] = useState(false);
     const [liveMetaData, setLiveMetaData] = useState({});
     const [liveGamePuuid, setLiveGamePuuid] = useState(null); // puuid del profilo attivo per LiveGameTab
@@ -258,6 +259,9 @@ export default function App() {
             try {
                 const more = await invoke("get_more_matches", { puuid, start: offset });
 
+                // Controlla che il fetch non sia stato cancellato durante l'await
+                if (!runningRef.current) break;
+
                 // more.length === 0 significa che Riot API non ha più match → fine
                 if (!more || more.length === 0) break;
 
@@ -285,6 +289,7 @@ export default function App() {
 
                 await new Promise(r => setTimeout(r, 3000));
             } catch (e) {
+                if (!runningRef.current) break;
                 const msg = String(e).toLowerCase();
                 if (msg.includes("429") || msg.includes("rate limit")) {
                     console.warn("Rate limit Riot, attendo 12s...");
@@ -496,6 +501,9 @@ export default function App() {
     }
 
     async function doSearch(gameName, tagLine) {
+        // Cancella eventuale season fetch in corso per la ricerca precedente
+        searchSeasonFetchRunning.current = false;
+
         setSearching(true);
         setSearchError(null);
         setSearchExtraMatches([]);
@@ -564,7 +572,7 @@ export default function App() {
     function handleTabChange(tab) {
         if (tab === "live-game") {
             // Usa il puuid del profilo attualmente visualizzato (search o proprio)
-            const activePuuid = searchData?.puuid ?? myPuuid ?? null;
+            const activePuuid = searchData?.puuid ?? profileData?.puuid ?? null;
             liveGamePuuidRef.current = activePuuid;
             setLiveGamePuuid(activePuuid);
         }

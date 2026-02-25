@@ -20,7 +20,7 @@ function useChampKeyMap() {
                 }
                 setMap(m);
             })
-            .catch(() => {});
+            .catch(() => { });
     }, []);
     return map;
 }
@@ -46,12 +46,20 @@ export function MasteriesTab({ puuid, profile }) {
 
     useEffect(() => {
         if (!puuid) return;
+        let cancelled = false;
         setLoading(true);
         setError(null);
         invoke("get_summoner_masteries", { puuid })
-            .then(data => setMasteries(Array.isArray(data) ? data : []))
-            .catch(e => setError(String(e)))
-            .finally(() => setLoading(false));
+            .then(data => {
+                if (!cancelled) setMasteries(Array.isArray(data) ? data : []);
+            })
+            .catch(e => {
+                if (!cancelled) setError(String(e));
+            })
+            .finally(() => {
+                if (!cancelled) setLoading(false);
+            });
+        return () => { cancelled = true; };
     }, [puuid]);
 
     if (!puuid) {

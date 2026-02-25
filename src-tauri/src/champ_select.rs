@@ -113,6 +113,33 @@ pub struct ChampSelectSession {
     pub game_mode: String,
 }
 
+/// Un singolo preset di rune (come OP.GG mostra più opzioni tra cui scegliere)
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RunePreset {
+    pub primary_page_id: u32,
+    pub primary_page_name: String,
+    pub primary_rune_ids: Vec<u32>,
+    pub sub_page_id: u32,
+    pub sub_page_name: String,
+    pub sub_rune_ids: Vec<u32>,
+    pub stat_mod_ids: Vec<u32>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct LaneBuildSummary {
+    pub lane: String,
+    pub primary_page_id: u32,
+    pub primary_page_name: String,
+    pub primary_rune_ids: Vec<u32>,
+    pub sub_page_id: u32,
+    pub sub_page_name: String,
+    pub sub_rune_ids: Vec<u32>,
+    pub stat_mod_ids: Vec<u32>,
+    pub summoner_spells: Vec<String>,
+    pub win_rate: f32,
+    pub play: u32,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ImportResult {
     pub runes_imported: bool,
@@ -120,9 +147,23 @@ pub struct ImportResult {
     pub items_imported: bool,
     pub rune_page_name: Option<String>,
     pub primary_path: Option<String>,
+    pub sub_path: Option<String>,
+    pub primary_page_id: Option<u32>,
+    pub sub_page_id: Option<u32>,
+    pub primary_rune_ids: Vec<u32>,
+    pub sub_rune_ids: Vec<u32>,
+    pub stat_mod_ids: Vec<u32>,
     pub summoner_spells: Vec<String>,
     pub item_blocks: Option<usize>,
     pub errors: Vec<String>,
+    /// Tutti i preset rune disponibili per questo campione/lane (come OP.GG)
+    pub rune_presets: Vec<RunePreset>,
+    /// Indice del preset attualmente importato (0 = primo)
+    pub active_rune_preset: usize,
+    /// Solo per URF/ARAM: rune disponibili per ogni lane, per la UI di selezione
+    pub available_lanes: Vec<LaneBuildSummary>,
+    /// Lane correntemente attiva per le rune
+    pub active_rune_lane: Option<String>,
 }
 
 /// Cerca il lockfile di League su tutte le lettere di drive possibili (C→Z).
@@ -271,7 +312,7 @@ async fn opgg_get_champion_build(champion_name: &str, position: &str, game_mode:
     // Costruisce gli arguments e invia la request, con retry per trovare il valore position corretto
     let desired_fields = json!([
         "data.summoner_spells.{ids,ids_names}",
-        "data.runes.{primary_page_id,primary_page_name,primary_rune_ids,secondary_page_id,secondary_page_name,secondary_rune_ids,stat_mod_ids}",
+        "data.runes[].{id,primary_page_id,primary_page_name,primary_rune_ids,primary_rune_names,secondary_page_id,secondary_page_name,secondary_rune_ids,secondary_rune_names,stat_mod_ids,stat_mod_names}",
         "data.starter_items[].{ids,ids_names}",
         "data.core_items[].{ids,ids_names}",
         "data.last_items[].{ids,ids_names}",
@@ -366,52 +407,166 @@ fn extract_array_content<'a>(s: &'a str, after: &str) -> Option<&'a str> {
 }
 
 fn parse_opgg_response(text: &str) -> Result<Value, String> {
-    let (primary_page_id, sub_page_id, primary_rune_ids, sub_rune_ids, stat_mod_ids) = {
-        // Formato attuale: Runes(primary_id,"primary_name",[primary_runes],sub_id,"sub_name",[sub_runes],[stat_mods])
-        // Es: Runes(8000,"Precision",[8008,9111,9103,8017],8300,"Inspiration",[8313,8321],[5005,5008,5011])
-        let runes_start = text.find("Runes(").ok_or("Runes( non trovato")?;
-        let runes_section = &text[runes_start + "Runes(".len()..];
+    // ── Confirmed OP.GG format (from real API response) ──────────────────────
+    // Runes(keystone_id, primary_page_id, "primary_name",
+    //        [primary_rune_ids],    ← array of u32
+    //        [primary_rune_names],  ← array of strings — SKIP
+    //        secondary_page_id, "secondary_name",
+    //        [secondary_rune_ids],  ← array of u32
+    //        [secondary_rune_names],← array of strings — SKIP
+    //        [stat_mod_ids],        ← array of u32
+    //        [stat_mod_names],      ← array of strings — SKIP
+    //        play, win, pick_rate)
+    //
+    // scalars before arr[0]: keystone_id, primary_page_id
+    // scalars between arr[1] (str) and arr[2] (sec ids): secondary_page_id
+    //
+    // Algorithm: iterate arrays, detect string arrays (contain "), skip them.
+    // Collect only numeric arrays: idx 0=primary_ids, 1=secondary_ids, 2=stat_ids
 
-        // Trova tutti gli array [...] dentro Runes(...)
-        // Array[0] = primary_rune_ids, Array[1] = sub_rune_ids, Array[2] = stat_mod_ids
-        let mut arrays: Vec<Vec<u32>> = Vec::new();
-        let mut scalars_before: Vec<Vec<u64>> = Vec::new(); // scalari prima di ogni array
+    fn parse_one_runes_block(section: &str) -> Option<(u32, u32, Vec<u32>, Vec<u32>, Vec<u32>, u32, f32)> {
+        let rb = section.as_bytes();
         let mut pos = 0;
-        let rbytes = runes_section.as_bytes();
-        let mut current_scalars = String::new();
-        while pos < rbytes.len() && arrays.len() < 3 {
-            if rbytes[pos] == b'[' {
-                // Salva gli scalari accumulati prima di questo array
-                scalars_before.push(extract_numbers(&current_scalars));
-                current_scalars.clear();
-                // Leggi l'array
-                let start = pos + 1;
-                pos += 1;
-                while pos < rbytes.len() && rbytes[pos] != b']' { pos += 1; }
-                let arr_str = &runes_section[start..pos];
-                arrays.push(arr_str.split(',').filter_map(|x| x.trim().parse::<u32>().ok()).collect());
-                pos += 1; // salta ]
-            } else if rbytes[pos] == b')' {
-                break; // fine Runes(...)
-            } else {
-                current_scalars.push(rbytes[pos] as char);
-                pos += 1;
+        let mut numeric_arrays: Vec<Vec<u32>> = Vec::new(); // only numeric arrays
+        let mut scalars: Vec<Vec<u64>> = Vec::new();        // scalars between arrays
+        let mut cur_sc = String::new();
+
+        while pos < rb.len() && numeric_arrays.len() < 3 {
+            match rb[pos] {
+                b'[' => {
+                    // Find matching ']', respecting nesting
+                    let start = pos + 1;
+                    pos += 1;
+                    let mut depth = 1i32;
+                    while pos < rb.len() && depth > 0 {
+                        if rb[pos] == b'[' { depth += 1; }
+                        else if rb[pos] == b']' { depth -= 1; }
+                        if depth > 0 { pos += 1; } else { break; }
+                    }
+                    let content = &section[start..pos];
+                    pos += 1; // skip ]
+
+                    // Is this a string array? (contains " or ')
+                    let is_string_arr = content.contains('"') || content.contains('\'');
+                    if is_string_arr {
+                        // Save scalars accumulated before this string array too
+                        // (between last array and this string array there may be secondary_page_id)
+                        scalars.push(extract_numbers(&cur_sc));
+                        cur_sc.clear();
+                        // Don't add to numeric_arrays, just skip
+                    } else {
+                        scalars.push(extract_numbers(&cur_sc));
+                        cur_sc.clear();
+                        let ids: Vec<u32> = content.split(',')
+                            .filter_map(|x| x.trim().parse::<u32>().ok())
+                            .collect();
+                        numeric_arrays.push(ids);
+                    }
+                }
+                b')' | b'}' => break,
+                c => {
+                    cur_sc.push(c as char);
+                    pos += 1;
+                }
             }
         }
 
-        // scalars_before[0] = testo prima del primo array → contiene primary_page_id
-        // scalars_before[1] = testo tra primo e secondo array → contiene sub_page_id
-        let primary_page_id = scalars_before.get(0).and_then(|v| v.get(0)).copied().unwrap_or(8000) as u32;
-        let sub_page_id     = scalars_before.get(1).and_then(|v| v.get(0)).copied().unwrap_or(8300) as u32;
-        let primary_ids = arrays.get(0).cloned().unwrap_or_default();
-        let sec_ids     = arrays.get(1).cloned().unwrap_or_default();
-        let stat_ids    = arrays.get(2).cloned().unwrap_or_else(|| vec![5008,5008,5002]);
+        eprintln!("[RLP-PARSE] numeric_arrays={} scalars_groups={}", numeric_arrays.len(), scalars.len());
+        for (i, a) in numeric_arrays.iter().enumerate() {
+            eprintln!("[RLP-PARSE]   num_arr[{}]: {:?}", i, a);
+        }
+        for (i, s) in scalars.iter().enumerate() {
+            eprintln!("[RLP-PARSE]   scalars[{}]: {:?}", i, s);
+        }
 
-        eprintln!("[RLP] runes parsed: primary={} sub={} primary_ids={:?} sub_ids={:?} stat={:?}",
-            primary_page_id, sub_page_id, primary_ids, sec_ids, stat_ids);
+        // scalars[0] = [keystone_id, primary_page_id, ...] (before primary_ids array)
+        // scalars after primary_ids = [primary_names array scalars = empty since it's a string array]
+        // scalars after primary_names = [secondary_page_id, ...]
+        //
+        // Since string arrays are skipped but their leading scalars ARE saved,
+        // scalars layout: [0]=before_primary_ids, [1]=before_primary_names, [2]=before_secondary_ids, [3]=...
+        //
+        // primary_page_id: second number in scalars[0]  (first is keystone_id)
+        // secondary_page_id: first number in scalars[2] (after primary_names)
 
-        (primary_page_id, sub_page_id, primary_ids, sec_ids, stat_ids)
-    };
+        let primary_page_id = scalars.get(0)
+            .and_then(|v| v.get(1))  // index 1 = primary_page_id (after keystone_id)
+            .copied()
+            .unwrap_or(8000) as u32;
+
+        let sub_page_id = scalars.get(2)  // after primary_ids + primary_names = scalars[2]
+            .and_then(|v| v.first())
+            .copied()
+            .or_else(|| scalars.get(1).and_then(|v| v.first()).copied())
+            .unwrap_or(8300) as u32;
+
+        let primary_ids = numeric_arrays.get(0).cloned().unwrap_or_default();
+        let sec_ids     = numeric_arrays.get(1).cloned().unwrap_or_default();
+        let stat_ids    = numeric_arrays.get(2).cloned().unwrap_or_else(|| vec![5008, 5008, 5002]);
+
+        if primary_ids.is_empty() { return None; }
+
+        // After the 3 numeric arrays, parse remaining scalars for play, win, pick_rate
+        // Format: ..., [stat_mod_names], play_int, win_int, pick_rate_float)
+        // Collect remaining text after last array processed
+        let mut tail_nums: Vec<f64> = Vec::new();
+        let mut ti = pos;
+        let rbytes = section.as_bytes();
+        while ti < section.len() && tail_nums.len() < 3 {
+            match rbytes[ti] {
+                b'[' => {
+                    // skip any trailing string arrays
+                    let mut d = 1i32;
+                    ti += 1;
+                    while ti < section.len() && d > 0 {
+                        if rbytes[ti] == b'[' { d += 1; }
+                        else if rbytes[ti] == b']' { d -= 1; }
+                        ti += 1;
+                    }
+                }
+                b')' | b'}' => break,
+                _ => {
+                    if rbytes[ti].is_ascii_digit() || rbytes[ti] == b'.' {
+                        let start = ti;
+                        while ti < section.len() && (rbytes[ti].is_ascii_digit() || rbytes[ti] == b'.') { ti += 1; }
+                        if let Ok(n) = section[start..ti].parse::<f64>() { tail_nums.push(n); }
+                    } else { ti += 1; }
+                }
+            }
+        }
+        let play = tail_nums.get(0).copied().unwrap_or(0.0) as u32;
+        let win = tail_nums.get(1).copied().unwrap_or(0.0) as u32;
+        let win_rate = if play > 0 { win as f32 / play as f32 } else { 0.0 };
+
+        Some((primary_page_id, sub_page_id, primary_ids, sec_ids, stat_ids, play, win_rate))
+    }
+
+    // Find ALL Runes(...) blocks — with runes[] array mode OP.GG may send multiple presets
+    let mut all_rune_blocks: Vec<(u32, u32, Vec<u32>, Vec<u32>, Vec<u32>, u32, f32)> = Vec::new();
+    {
+        let mut search_from = 0usize;
+        while let Some(rel) = text[search_from..].find("Runes(") {
+            let rp = search_from + rel;
+            let section = &text[rp + "Runes(".len()..];
+            if let Some(block) = parse_one_runes_block(section) {
+                // Avoid duplicates (same primary keystone)
+                if !all_rune_blocks.iter().any(|(_, _, ids, _, _, _, _)| ids.first() == block.2.first()) {
+                    all_rune_blocks.push(block);
+                }
+            }
+            search_from = rp + "Runes(".len() + 1;
+        }
+    }
+    if all_rune_blocks.is_empty() {
+        return Err("Runes( non trovato nella risposta OP.GG".to_string());
+    }
+    eprintln!("[RLP] rune blocks found: {}", all_rune_blocks.len());
+
+    let (primary_page_id, sub_page_id, primary_rune_ids, sub_rune_ids, stat_mod_ids, _rune_play, _rune_wr) =
+        all_rune_blocks[0].clone();
+
+    eprintln!("[RLP] rune parsed: primary_page={} sub_page={} primary_ids={:?} sub_ids={:?} stat={:?}",
+        primary_page_id, sub_page_id, primary_rune_ids, sub_rune_ids, stat_mod_ids);
 
     let summoner_spells: Value = {
         fn spell_id_to_name(id: u64) -> &'static str {
@@ -421,20 +576,39 @@ fn parse_opgg_response(text: &str) -> Result<Value, String> {
                 _=>"Flash",
             }
         }
+        // Summoner spells are stored as small IDs (1-32).
+        // In full OP.GG response they appear as: CoreItems([4,11],[4,11],play,win,rate)
+        // In limited response: SummonerSpells([4,11],[4,11])
+        // Find the first block (CoreItems or SummonerSpells) whose first array contains only spell IDs (<=32)
         let mut names: Vec<Value> = Vec::new();
-        if let Some(pos) = text.find("SummonerSpells(") {
-            let section = &text[pos+"SummonerSpells(".len()..];
-            if let Some(bracket_start) = section.find('[') {
-                let bracket_section = &section[bracket_start..];
-                if let Some(bracket_end) = bracket_section.find(']') {
-                    let ids_str = &bracket_section[1..bracket_end];
-                    for id_str in ids_str.split(',') {
-                        if let Ok(id) = id_str.trim().parse::<u64>() { names.push(json!(spell_id_to_name(id))); }
+        let spell_prefixes = ["SummonerSpells(", "CoreItems("];
+        let mut search_text = text;
+        // Skip past Runes( block to avoid picking up rune IDs
+        if let Some(rp) = search_text.find("Runes(") { search_text = &search_text[rp..]; }
+        // Search backwards from Runes for summoner spells (they come BEFORE Runes in the full response)
+        let pre_runes = if let Some(rp) = text.find("Runes(") { &text[..rp] } else { text };
+        for prefix in &spell_prefixes {
+            let mut s = pre_runes;
+            while let Some(pos) = s.find(prefix) {
+                s = &s[pos + prefix.len()..];
+                if let Some(b_start) = s.find('[') {
+                    let inner = &s[b_start+1..];
+                    if let Some(b_end) = inner.find(']') {
+                        let ids_str = &inner[..b_end];
+                        let ids: Vec<u64> = ids_str.split(',')
+                            .filter_map(|x| x.trim().parse::<u64>().ok())
+                            .collect();
+                        // Summoner spell IDs are all <= 32
+                        if ids.iter().all(|&id| id <= 32) && ids.len() >= 2 {
+                            for id in &ids { names.push(json!(spell_id_to_name(*id))); }
+                            break;
+                        }
                     }
                 }
             }
+            if names.len() >= 2 { break; }
         }
-        if names.len() >= 2 { json!([names[0].clone(), names[1].clone()]) } else { json!(["Flash","Heal"]) }
+        if names.len() >= 2 { json!([names[0].clone(), names[1].clone()]) } else { json!(["Flash","Smite"]) }
     };
 
     fn to_items(ids: &[u64]) -> Value {
@@ -444,9 +618,16 @@ fn parse_opgg_response(text: &str) -> Result<Value, String> {
     // Estrae tutti gli ID item da una stringa che contiene SummonerSpells(...)
     fn extract_item_ids_from_group(group: &str) -> Vec<u64> {
         let mut ids = Vec::new();
+        // OP.GG uses CoreItems(...) in full responses and SummonerSpells(...) in limited responses
+        let prefixes = ["CoreItems(", "SummonerSpells(", "StarterItems("];
         let mut search = group;
-        while let Some(pos) = search.find("SummonerSpells(") {
-            search = &search[pos + "SummonerSpells(".len()..];
+        loop {
+            // Find the earliest occurrence of any prefix
+            let next = prefixes.iter()
+                .filter_map(|p| search.find(p).map(|pos| (pos, *p)))
+                .min_by_key(|(pos, _)| *pos);
+            let Some((pos, prefix)) = next else { break };
+            search = &search[pos + prefix.len()..];
             if let Some(b_start) = search.find('[') {
                 let s = &search[b_start+1..];
                 if let Some(b_end) = s.find(']') {
@@ -464,20 +645,21 @@ fn parse_opgg_response(text: &str) -> Result<Value, String> {
     // ── Parser strutturale ────────────────────────────────────────────────────
     // La risposta OP.GG ha questa struttura nel testo:
     //   Data(
-    //     SummonerSpells([spells]),          ← summoner spells
-    //     Runes(...),                        ← rune
-    //     SummonerSpells([starter]),         ← starter items (blocco singolo)
-    //     SummonerSpells([core_1,core_2,..]),← core build principale (blocco singolo con più item)
-    //     [SummonerSpells([c]),..],          ← varianti core (gruppo tra [])
-    //     [SummonerSpells([d]),..],          ← 4th item options (gruppo tra [])
-    //     [SummonerSpells([e]),..],          ← 5th item options
-    //     [SummonerSpells([f]),..],          ← 6th item options
-    //     SummonerSpells([boots]),           ← boots (blocco singolo)
-    //     Skills([...]),                     ← skill order
+    //     SummonerSpells([spells]) or CoreItems([spells]),  ← summoner spells
+    //     Runes(...),                                       ← rune
+    //     StarterItems([...]) or CoreItems([starter]),      ← starter items
+    //     CoreItems([core_1,core_2,..]),                    ← core build principale
+    //     [CoreItems([c]),..],                              ← varianti core (gruppo tra [])
+    //     [CoreItems([d]),..],                              ← 4th item options
+    //     [CoreItems([e]),..],                              ← 5th item options
+    //     [CoreItems([f]),..],                              ← 6th item options
+    //     CoreItems([boots]),                               ← boots
+    //     Skills([...]),                                    ← skill order
     //   )
     //
+    // NOTE: OP.GG uses CoreItems(...) in full responses, SummonerSpells(...) in limited responses.
     // Strategia: troviamo la sezione Data(...) e separiamo i token top-level
-    // distinguendo blocchi singoli SummonerSpells(...) da gruppi [...].
+    // distinguendo blocchi singoli da gruppi [...].
 
     let data_start = text.find("LolGetChampionAnalysis(").unwrap_or(0);
     let data_section = &text[data_start..];
@@ -520,11 +702,14 @@ fn parse_opgg_response(text: &str) -> Result<Value, String> {
                 let ids = extract_item_ids_from_group(group_str);
                 if !ids.is_empty() { tokens.push(Token::Group(ids)); }
             }
-            b'S' if after_runes[i..].starts_with("StarterItems(") || after_runes[i..].starts_with("SummonerSpells(") => {
-                // Blocco singolo: StarterItems( oppure SummonerSpells( fuori da gruppi []
-                // Determina la lunghezza del prefisso
+            b'S' | b'C' if after_runes[i..].starts_with("StarterItems(")
+                || after_runes[i..].starts_with("SummonerSpells(")
+                || after_runes[i..].starts_with("CoreItems(") => {
+                // Blocco singolo: StarterItems(, SummonerSpells(, o CoreItems( fuori da gruppi []
                 let prefix_len = if after_runes[i..].starts_with("StarterItems(") {
                     "StarterItems(".len()
+                } else if after_runes[i..].starts_with("CoreItems(") {
+                    "CoreItems(".len()
                 } else {
                     "SummonerSpells(".len()
                 };
@@ -549,6 +734,7 @@ fn parse_opgg_response(text: &str) -> Result<Value, String> {
     }
 
     eprintln!("[RLP] tokens strutturali: {:?}", tokens);
+    eprintln!("[RLP] token count: singles={} groups={}", tokens.iter().filter(|t| matches!(t, Token::Single(_))).count(), tokens.iter().filter(|t| matches!(t, Token::Group(_))).count());
 
     // Classifica i token:
     // Single[0] = starter, Single[1] = core principale, Single[last] = boots
@@ -609,13 +795,29 @@ fn parse_opgg_response(text: &str) -> Result<Value, String> {
         order
     };
 
+    // Build rune_presets array from all found blocks
+    let rune_presets_json: Vec<Value> = all_rune_blocks.iter().map(|(ppid, spid, pids, sids, stids, play, win_rate)| {
+        json!({
+            "primary_page_id": ppid,
+            "sub_page_id": spid,
+            "primary_rune_ids": pids,
+            "sub_rune_ids": sids,
+            "stat_mod_ids": stids,
+            "play": play,
+            "win_rate": win_rate,
+        })
+    }).collect();
+
     Ok(json!({
         "data": {
             "runes": {
-                "primary_page_id": primary_page_id, "sub_page_id": sub_page_id,
-                "primary_rune_ids": primary_rune_ids, "sub_rune_ids": sub_rune_ids,
+                "primary_page_id": primary_page_id,
+                "sub_page_id": sub_page_id,
+                "primary_rune_ids": primary_rune_ids,
+                "sub_rune_ids": sub_rune_ids,
                 "stat_mod_ids": stat_mod_ids
             },
+            "rune_presets": rune_presets_json,
             "summoner_spells": summoner_spells,
             "starter_items":   to_items(starter),
             "core_items":      to_items(core),
@@ -799,6 +1001,110 @@ async fn opgg_get_builds_multi_lane(champion_name: &str) -> Vec<(String, Value)>
     results
 }
 
+fn build_to_lane_summary(lane: &str, build: &Value) -> LaneBuildSummary {
+    let rune_data = build.pointer("/data/runes").cloned().unwrap_or(serde_json::json!({}));
+    let primary_page_id = rune_data["primary_page_id"].as_u64().map(|n| n as u32).unwrap_or(8000);
+    let sub_page_id     = rune_data["sub_page_id"].as_u64().map(|n| n as u32).unwrap_or(8300);
+    let primary_rune_ids: Vec<u32> = rune_data["primary_rune_ids"].as_array().unwrap_or(&vec![])
+        .iter().filter_map(|v| v.as_u64().map(|n| n as u32)).collect();
+    let sub_rune_ids: Vec<u32> = rune_data["sub_rune_ids"].as_array().unwrap_or(&vec![])
+        .iter().filter_map(|v| v.as_u64().map(|n| n as u32)).collect();
+    let stat_mod_ids: Vec<u32> = rune_data["stat_mod_ids"].as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_u64().map(|n| n as u32)).collect())
+        .unwrap_or_else(|| vec![5008, 5008, 5002]);
+    let primary_page_name = rune_path_name(primary_page_id);
+    let sub_page_name     = rune_path_name(sub_page_id);
+    let summoner_spells: Vec<String> = build.pointer("/data/summoner_spells")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    // win_rate and play from the first rune preset if available
+    let (win_rate, play) = build.pointer("/data/rune_presets")
+        .and_then(|v| v.as_array())
+        .and_then(|a| a.first())
+        .map(|p| (
+            p["win_rate"].as_f64().unwrap_or(0.0) as f32,
+            p["play"].as_u64().unwrap_or(0) as u32,
+        ))
+        .unwrap_or((0.0, 0));
+    LaneBuildSummary {
+        lane: lane.to_string(),
+        primary_page_id, primary_page_name,
+        primary_rune_ids,
+        sub_page_id, sub_page_name,
+        sub_rune_ids, stat_mod_ids,
+        summoner_spells,
+        win_rate, play,
+    }
+}
+
+fn rune_path_name(id: u32) -> String {
+    match id {
+        8000 => "Precision",
+        8100 => "Domination",
+        8200 => "Sorcery",
+        8400 => "Resolve",
+        8300 => "Inspiration",
+        _    => "Unknown",
+    }.to_string()
+}
+
+/// Importa solo le rune per la lane scelta dall'utente (usato in URF/ARAM dopo la selezione manuale).
+#[tauri::command]
+pub async fn import_runes_for_lane(
+    champion_name: String,
+    lane: String,
+    mode_label: String,
+) -> Result<ImportResult, String> {
+    let mut result = ImportResult {
+        runes_imported: false, summoners_imported: false, items_imported: false,
+        rune_page_name: None, primary_path: None, sub_path: None,
+        primary_page_id: None, sub_page_id: None,
+        primary_rune_ids: Vec::new(), sub_rune_ids: Vec::new(), stat_mod_ids: Vec::new(),
+        summoner_spells: Vec::new(),
+        item_blocks: None, errors: Vec::new(),
+        rune_presets: Vec::new(), active_rune_preset: 0,
+        available_lanes: Vec::new(), active_rune_lane: None,
+    };
+    let lcu = match LcuClient::new() {
+        Some(c) => c,
+        None => { result.errors.push("Client LoL non disponibile".to_string()); return Ok(result); }
+    };
+    let build = match opgg_get_champion_build(&champion_name, &lane, "ranked").await {
+        Ok(b) => b,
+        Err(e) => { result.errors.push(format!("Fetch build fallito: {}", e)); return Ok(result); }
+    };
+    let rune_label = format!("{} {}", mode_label, lane);
+    match import_runes(&lcu, &champion_name, &rune_label, &build).await {
+        Ok((name, path)) => {
+            result.runes_imported = true;
+            result.rune_page_name = Some(name);
+            result.primary_path = Some(path);
+            result.active_rune_lane = Some(lane.clone());
+            if let Some(rd) = build.pointer("/data/runes") {
+                result.primary_page_id = rd["primary_page_id"].as_u64().map(|n| n as u32);
+                result.sub_page_id = rd["sub_page_id"].as_u64().map(|n| n as u32);
+                result.primary_rune_ids = rd["primary_rune_ids"].as_array().unwrap_or(&vec![]).iter().filter_map(|v| v.as_u64().map(|n| n as u32)).collect();
+                result.sub_rune_ids = rd["sub_rune_ids"].as_array().unwrap_or(&vec![]).iter().filter_map(|v| v.as_u64().map(|n| n as u32)).collect();
+                result.stat_mod_ids = rd["stat_mod_ids"].as_array().map(|a| a.iter().filter_map(|v| v.as_u64().map(|n| n as u32)).collect()).unwrap_or_else(|| vec![5008,5008,5002]);
+                result.sub_path = Some(rune_path_name(result.sub_page_id.unwrap_or(8300)));
+            }
+        }
+        Err(e) => result.errors.push(format!("Rune: {}", e)),
+    }
+    // Summoner spells: imposta quelli della lane scelta
+    match import_summoners(&lcu, &build).await {
+        Ok(spells) => { result.summoners_imported = true; result.summoner_spells = spells; }
+        Err(_) => { result.summoners_imported = false; }
+    }
+    // Item set per la lane scelta
+    match import_item_set(&lcu, &champion_name, &lane, &build, "", None).await {
+        Ok(blocks) => { result.items_imported = true; result.item_blocks = Some(blocks); }
+        Err(e) => result.errors.push(format!("Item set: {}", e)),
+    }
+    Ok(result)
+}
+
 #[tauri::command]
 pub async fn get_champ_select_session() -> Result<ChampSelectSession, String> {
     let lcu = LcuClient::new().ok_or("CLIENT_CLOSED")?;
@@ -876,8 +1182,14 @@ pub async fn debug_champ_select_slot() -> Result<Value, String> {
 pub async fn auto_import_build(champion_name: String, assigned_position: String, game_mode: String) -> Result<ImportResult, String> {
     eprintln!("[RLP] auto_import_build: {} {} mode={}", champion_name, assigned_position, game_mode);
     let mut result = ImportResult {
-        runes_imported:false, summoners_imported:false, items_imported:false,
-        rune_page_name:None, primary_path:None, summoner_spells:Vec::new(), item_blocks:None, errors:Vec::new(),
+        runes_imported: false, summoners_imported: false, items_imported: false,
+        rune_page_name: None, primary_path: None, sub_path: None,
+        primary_page_id: None, sub_page_id: None,
+        primary_rune_ids: Vec::new(), sub_rune_ids: Vec::new(), stat_mod_ids: Vec::new(),
+        summoner_spells: Vec::new(),
+        item_blocks: None, errors: Vec::new(),
+        rune_presets: Vec::new(), active_rune_preset: 0,
+        available_lanes: Vec::new(), active_rune_lane: None,
     };
     
     let lcu = match LcuClient::new() {
@@ -911,7 +1223,58 @@ pub async fn auto_import_build(champion_name: String, assigned_position: String,
         };
 
         match import_runes(&lcu, &champion_name, mode_label, &build).await {
-            Ok((name,path)) => { result.runes_imported=true; result.rune_page_name=Some(name); result.primary_path=Some(path); }
+            Ok((name,path)) => { result.runes_imported=true; result.rune_page_name=Some(name); result.primary_path=Some(path);
+                // Popola i dati visivi delle rune per la UI
+                if let Some(rd) = build.pointer("/data/runes") {
+                    result.primary_page_id = rd["primary_page_id"].as_u64().map(|n| n as u32);
+                    result.sub_page_id = rd["sub_page_id"].as_u64().map(|n| n as u32);
+                    result.primary_rune_ids = rd["primary_rune_ids"].as_array().unwrap_or(&vec![]).iter().filter_map(|v| v.as_u64().map(|n| n as u32)).collect();
+                    result.sub_rune_ids = rd["sub_rune_ids"].as_array().unwrap_or(&vec![]).iter().filter_map(|v| v.as_u64().map(|n| n as u32)).collect();
+                    result.stat_mod_ids = rd["stat_mod_ids"].as_array().map(|a| a.iter().filter_map(|v| v.as_u64().map(|n| n as u32)).collect()).unwrap_or_else(|| vec![5008,5008,5002]);
+                    result.sub_path = Some(rune_path_name(result.sub_page_id.unwrap_or(8300)));
+                    // Leggi tutti i preset rune restituiti da parse_opgg_response
+                    if let Some(presets_arr) = build.pointer("/data/rune_presets").and_then(|v| v.as_array()) {
+                        result.rune_presets = presets_arr.iter().filter_map(|p| {
+                            let ppid = p["primary_page_id"].as_u64()? as u32;
+                            let spid = p["sub_page_id"].as_u64()? as u32;
+                            let pids: Vec<u32> = p["primary_rune_ids"].as_array()?.iter()
+                                .filter_map(|v| v.as_u64().map(|n| n as u32)).collect();
+                            let sids: Vec<u32> = p["sub_rune_ids"].as_array()?.iter()
+                                .filter_map(|v| v.as_u64().map(|n| n as u32)).collect();
+                            let stids: Vec<u32> = p["stat_mod_ids"].as_array()
+                                .map(|a| a.iter().filter_map(|v| v.as_u64().map(|n| n as u32)).collect())
+                                .unwrap_or_else(|| vec![5008, 5008, 5002]);
+                            Some(RunePreset {
+                                primary_page_id: ppid,
+                                primary_page_name: rune_path_name(ppid),
+                                primary_rune_ids: pids,
+                                sub_page_id: spid,
+                                sub_page_name: rune_path_name(spid),
+                                sub_rune_ids: sids,
+                                stat_mod_ids: stids,
+                            })
+                        }).collect();
+                    }
+                    // Fallback: se nessun preset trovato, costruisci dal primo set
+                    if result.rune_presets.is_empty() {
+                        let ppid = result.primary_page_id.unwrap_or(8000);
+                        let spid = result.sub_page_id.unwrap_or(8300);
+                        if !result.primary_rune_ids.is_empty() {
+                            result.rune_presets = vec![RunePreset {
+                                primary_page_id: ppid,
+                                primary_page_name: rune_path_name(ppid),
+                                primary_rune_ids: result.primary_rune_ids.clone(),
+                                sub_page_id: spid,
+                                sub_page_name: rune_path_name(spid),
+                                sub_rune_ids: result.sub_rune_ids.clone(),
+                                stat_mod_ids: result.stat_mod_ids.clone(),
+                            }];
+                        }
+                    }
+                    eprintln!("[RLP] rune_presets populated: {}", result.rune_presets.len());
+                    result.active_rune_preset = 0;
+                }
+            }
             Err(e) => result.errors.push(format!("Rune: {}", e)),
         }
         match import_summoners(&lcu, &build).await {
@@ -922,6 +1285,8 @@ pub async fn auto_import_build(champion_name: String, assigned_position: String,
             Ok(blocks) => { result.items_imported=true; result.item_blocks=Some(blocks); }
             Err(e) => result.errors.push(format!("Item set: {}", e)),
         }
+        // available_lanes viene popolato dal comando separato fetch_lanes_for_champion
+        // chiamato dal frontend subito dopo auto_import_build
     } else {
         // ── URF / ARAM / altre modalità: fetch parallelo per tutte le lane ────
         // L'API OP.GG non accetta game_mode=urf/aram; usiamo ranked come workaround.
@@ -933,14 +1298,24 @@ pub async fn auto_import_build(champion_name: String, assigned_position: String,
             return Ok(result);
         }
 
-        // Rune: usiamo la build MID (prima dell'array, o la prima disponibile)
+        // Popola available_lanes per la UI di selezione rune
+        result.available_lanes = lane_builds.iter()
+            .map(|(lane, build)| build_to_lane_summary(lane, build))
+            .collect();
+
+        // Rune: default alla build MID (l'utente può cambiare dalla UI)
         let rune_build = lane_builds.iter()
             .find(|(l, _)| l == "MID")
             .or_else(|| lane_builds.first());
         if let Some((rune_lane, build)) = rune_build {
             let rune_label = format!("{} {}", mode_label, rune_lane);
             match import_runes(&lcu, &champion_name, &rune_label, build).await {
-                Ok((name,path)) => { result.runes_imported=true; result.rune_page_name=Some(name); result.primary_path=Some(path); }
+                Ok((name, path)) => {
+                    result.runes_imported = true;
+                    result.rune_page_name = Some(name);
+                    result.primary_path = Some(path);
+                    result.active_rune_lane = Some(rune_lane.clone());
+                }
                 Err(e) => result.errors.push(format!("Rune: {}", e)),
             }
         }
@@ -973,4 +1348,108 @@ pub async fn auto_import_build(champion_name: String, assigned_position: String,
     }
     
     Ok(result)
+}
+/// Importa un preset di rune specifico (indice 0-based nell'array rune_presets).
+/// Chiamato dal frontend quando l'utente clicca su un preset alternativo.
+#[tauri::command]
+pub async fn import_rune_preset(
+    champion_name: String,
+    position: String,
+    preset_index: usize,
+) -> Result<ImportResult, String> {
+    let mut result = ImportResult {
+        runes_imported: false, summoners_imported: false, items_imported: false,
+        rune_page_name: None, primary_path: None, sub_path: None,
+        primary_page_id: None, sub_page_id: None,
+        primary_rune_ids: Vec::new(), sub_rune_ids: Vec::new(), stat_mod_ids: Vec::new(),
+        summoner_spells: Vec::new(),
+        item_blocks: None, errors: Vec::new(),
+        rune_presets: Vec::new(), active_rune_preset: preset_index,
+        available_lanes: Vec::new(), active_rune_lane: None,
+    };
+
+    let lcu = match LcuClient::new() {
+        Some(c) => c,
+        None => { result.errors.push("Client LoL non disponibile".to_string()); return Ok(result); }
+    };
+
+    // Ri-fetcha la build per avere tutti i preset
+    let build = match opgg_get_champion_build(&champion_name, &position, "ranked").await {
+        Ok(b) => b,
+        Err(e) => { result.errors.push(format!("OP.GG fetch fallito: {}", e)); return Ok(result); }
+    };
+
+    // Estrai tutti i preset
+    let all_presets: Vec<RunePreset> = build.pointer("/data/rune_presets")
+        .and_then(|v| v.as_array())
+        .map(|presets| presets.iter().filter_map(|p| {
+            let ppid = p["primary_page_id"].as_u64()? as u32;
+            let spid = p["sub_page_id"].as_u64()? as u32;
+            let pids: Vec<u32> = p["primary_rune_ids"].as_array()?.iter().filter_map(|v| v.as_u64().map(|n| n as u32)).collect();
+            let sids: Vec<u32> = p["sub_rune_ids"].as_array()?.iter().filter_map(|v| v.as_u64().map(|n| n as u32)).collect();
+            let stids: Vec<u32> = p["stat_mod_ids"].as_array().map(|a| a.iter().filter_map(|v| v.as_u64().map(|n| n as u32)).collect()).unwrap_or_else(|| vec![5008,5008,5002]);
+            Some(RunePreset {
+                primary_page_id: ppid, primary_page_name: rune_path_name(ppid),
+                primary_rune_ids: pids, sub_page_id: spid, sub_page_name: rune_path_name(spid),
+                sub_rune_ids: sids, stat_mod_ids: stids,
+            })
+        }).collect())
+        .unwrap_or_default();
+
+    let preset = match all_presets.get(preset_index) {
+        Some(p) => p.clone(),
+        None => {
+            result.errors.push(format!("Preset index {} non trovato (total: {})", preset_index, all_presets.len()));
+            return Ok(result);
+        }
+    };
+
+    // Costruisce un build Value con le rune del preset selezionato
+    let preset_build = json!({
+        "data": {
+            "runes": {
+                "primary_page_id": preset.primary_page_id,
+                "sub_page_id": preset.sub_page_id,
+                "primary_rune_ids": preset.primary_rune_ids,
+                "sub_rune_ids": preset.sub_rune_ids,
+                "stat_mod_ids": preset.stat_mod_ids,
+            }
+        }
+    });
+
+    let page_suffix = format!("{} {}", position, preset_index + 1);
+    match import_runes(&lcu, &champion_name, &page_suffix, &preset_build).await {
+        Ok((name, path)) => {
+            result.runes_imported = true;
+            result.rune_page_name = Some(name);
+            result.primary_path = Some(path);
+            result.primary_page_id = Some(preset.primary_page_id);
+            result.sub_page_id = Some(preset.sub_page_id);
+            result.primary_rune_ids = preset.primary_rune_ids.clone();
+            result.sub_rune_ids = preset.sub_rune_ids.clone();
+            result.stat_mod_ids = preset.stat_mod_ids.clone();
+            result.sub_path = Some(rune_path_name(preset.sub_page_id));
+        }
+        Err(e) => result.errors.push(format!("Rune: {}", e)),
+    }
+
+    result.rune_presets = all_presets;
+    result.active_rune_preset = preset_index;
+    Ok(result)
+}
+
+/// Fetch separato per le build di tutte le lane — chiamato dal frontend
+/// subito dopo auto_import_build per non bloccare l'import principale.
+#[tauri::command]
+pub async fn fetch_lanes_for_champion(champion_name: String) -> Result<Vec<LaneBuildSummary>, String> {
+    eprintln!("[RLP] fetch_lanes_for_champion: {}", champion_name);
+    let lane_builds = opgg_get_builds_multi_lane(&champion_name).await;
+    if lane_builds.is_empty() {
+        return Ok(vec![]);
+    }
+    let summaries: Vec<LaneBuildSummary> = lane_builds.iter()
+        .map(|(lane, build)| build_to_lane_summary(lane, build))
+        .collect();
+    eprintln!("[RLP] fetch_lanes_for_champion: {} lanes fetched", summaries.len());
+    Ok(summaries)
 }

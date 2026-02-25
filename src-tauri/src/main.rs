@@ -18,7 +18,7 @@ use postgres_native_tls::MakeTlsConnector;
 // ────────────────────────────────────────────────────────────────────────────
 
 mod champ_select;
-use champ_select::{get_champ_select_session, auto_import_build, debug_champ_select_slot};
+use champ_select::{get_champ_select_session, auto_import_build, debug_champ_select_slot, import_runes_for_lane, import_rune_preset, fetch_lanes_for_champion};
 
 const OPGG_MCP_URL: &str = "https://mcp-api.op.gg/mcp";
 
@@ -2139,7 +2139,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_profiles, get_more_matches, search_summoner, get_opgg_data,
             get_champ_select_session, auto_import_build, list_opgg_tools,
-            debug_champ_select_slot, get_tier_list, get_opgg_matches, get_rlp_matches,
+            debug_champ_select_slot, import_runes_for_lane, import_rune_preset, fetch_lanes_for_champion, get_tier_list, get_opgg_matches, get_rlp_matches,
             get_live_game, check_live_game, get_summoner_masteries, get_match_timeline,
             search_summoner_suggestions
         ])
