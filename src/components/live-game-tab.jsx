@@ -97,7 +97,7 @@ function calcGameTime(data, elapsed) {
     return (data?.game_time ?? 0) + elapsed;
 }
 
-// Hook champion id → name
+// Hook champion id (intero) → nome DDragon
 function useChampIdMap() {
     const [map, setMap] = useState({});
     useEffect(() => {
@@ -116,7 +116,6 @@ function useChampIdMap() {
     }, []);
     return map;
 }
-
 // ── Sotto-componenti ──────────────────────────────────────────────────────────
 
 function RankBadge({ tier, rank, lp }) {
@@ -204,12 +203,13 @@ function normalizeRole(raw) {
  *   player.total_games       → number (partite totali, usato per OTP detection)
  *   bannedChampions          → array of champName strings (ban del match)
  */
-function buildPlayerBadges(player, champName, bannedChampions = []) {
+function buildPlayerBadges(player, champName, bannedChampions = [], champIdMap = {}) {
     const badges = [];
 
     // ── 1. Possibile smurf (livello account 1-89) ──────────────────────────
-    const lvl = player.summoner_level;
-    if (lvl != null && lvl >= 1 && lvl <= 89) {
+    // Turso può restituire il livello come stringa — normalizziamo a numero
+    const lvl = player.summoner_level != null ? Number(player.summoner_level) : null;
+    if (lvl != null && !isNaN(lvl) && lvl >= 1 && lvl <= 89) {
         badges.push({
             key: "smurf",
             label: `Lv.${lvl} · Possibile smurf`,
@@ -255,7 +255,9 @@ function buildPlayerBadges(player, champName, bannedChampions = []) {
     }
 
     // ── 3b. Main bannato ──────────────────────────────────────────────────
-    const mainChamp = player.main_champion;
+    // Supporta sia main_champion (stringa nome) che main_champion_id (numero, fallback API live)
+    const mainChamp = player.main_champion
+        ?? (player.main_champion_id != null ? champIdMap[player.main_champion_id] : null);
     if (mainChamp && !isOtp) {
         const isBanned = bannedChampions.some(b =>
             b?.toLowerCase() === mainChamp.toLowerCase()
@@ -288,7 +290,7 @@ function PlayerRow({ player, champIdMap, side, duoWith, bannedChampions }) {
     const isLeft = side === "ORDER";
     // champion_name può essere già il nome DDragon (Spectator) oppure il nome esteso LCD
     const champName = normalizeLcdChampName(player.champion_name) || champIdMap[player.champion_id] || "";
-    const smartBadges = buildPlayerBadges(player, champName, bannedChampions);
+    const smartBadges = buildPlayerBadges(player, champName, bannedChampions, champIdMap);
 
     return (
         <div className={`flex items-center gap-3 py-2.5 px-3 rounded-xl transition-colors
@@ -415,7 +417,7 @@ function TeamPanel({ players, bans, side, champIdMap, duoMap, allBannedChampName
 
 // ── Tab principale ────────────────────────────────────────────────────────────
 
-export function LiveGameTab({ puuidOverride = null, myPuuid = null }) {
+export function LiveGameTab({ puuidOverride = null, myPuuid = null, onStatusChange = null }) {
     const [data, setData] = useState(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
@@ -427,9 +429,9 @@ export function LiveGameTab({ puuidOverride = null, myPuuid = null }) {
     const pollRef = useRef(null);
     const tickRef = useRef(null);
 
-    // Se abbiamo un puuidOverride usiamo check_live_game (Spectator V5, funziona per tutti).
-    // get_live_game viene usato SOLO se non c'è nessun puuid (LCD locale puro, senza account info).
-    const isSelf = !puuidOverride;
+    // isSelf = true quando non c'è puuid O quando il puuid è il proprio.
+    // In entrambi i casi usiamo get_live_game (LCD locale + Spectator, più completo).
+    const isSelf = !puuidOverride || (myPuuid != null && puuidOverride === myPuuid);
 
     const fetchData = useCallback(async () => {
         // Blocca il fetch se puuidOverride non è ancora pronto (evita flash "non in partita")
@@ -445,12 +447,14 @@ export function LiveGameTab({ puuidOverride = null, myPuuid = null }) {
             }
             setData(res);
             setError(null);
+            if (onStatusChange) onStatusChange(res?.in_game === true);
             if (res?.in_game) {
                 setElapsed(0);
             }
         } catch (e) {
             const msg = String(e);
             setError(msg.includes("CLIENT_CLOSED") ? "client_closed" : msg);
+            if (onStatusChange) onStatusChange(false);
             setData(null);
         } finally {
             setLoading(false);

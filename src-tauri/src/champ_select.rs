@@ -4,8 +4,323 @@ use serde_json::{json, Value};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+use std::collections::HashMap;
 use base64::{engine::general_purpose, Engine as _};
+use tokio::sync::{OnceCell, RwLock};
 
+// ── Turso (libSQL HTTP) ───────────────────────────────────────────────────────
+const TURSO_URL: &str   = env!("TURSO_URL");   // es. libsql://rlp-dataset-xxx.turso.io
+const TURSO_TOKEN: &str = env!("TURSO_TOKEN"); // JWT token Turso
+
+// ── DB Build cache in-memory ─────────────────────────────────────────────────
+// Chiave: (champion_id, lane_normalizzata) -> DbBuild gia calcolata.
+// Viene invalidata solo al riavvio dell'app (durata della session LoL).
+static DB_BUILD_CACHE: OnceCell<RwLock<HashMap<(i64, String), DbBuild>>> = OnceCell::const_new();
+
+async fn db_build_cache() -> &'static RwLock<HashMap<(i64, String), DbBuild>> {
+    DB_BUILD_CACHE.get_or_init(|| async { RwLock::new(HashMap::new()) }).await
+}
+
+/// Esegue una query SQL su Turso via HTTP e ritorna le righe come Vec<Vec<Value>>.
+async fn turso_query(sql: &str, args: Vec<Value>) -> Result<Vec<Vec<Value>>, String> {
+    let url = TURSO_URL.replace("libsql://", "https://") + "/v2/pipeline";
+    let body = json!({
+        "requests": [{
+            "type": "execute",
+            "stmt": {
+                "sql": sql,
+                "args": args.iter().map(|a| match a {
+                    Value::Number(n) => json!({"type":"integer","value": n.to_string()}),
+                    Value::String(s) => json!({"type":"text","value": s}),
+                    _ => json!({"type":"null","value": null}),
+                }).collect::<Vec<_>>()
+            }
+        }, {"type":"close"}]
+    });
+
+    let client = Client::new();
+    let resp = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", TURSO_TOKEN))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send().await.map_err(|e| format!("Turso HTTP error: {}", e))?;
+
+    let data: Value = resp.json().await.map_err(|e| format!("Turso JSON error: {}", e))?;
+
+    // Estrae le righe dalla risposta pipeline
+    let rows_raw = data.pointer("/results/0/response/result/rows")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| {
+            let err = data.pointer("/results/0/response/error/message")
+                .and_then(|v| v.as_str()).unwrap_or("risposta Turso vuota");
+            format!("Turso query fallita: {}", err)
+        })?;
+
+    // Ogni riga è un array di {type, value}
+    let rows: Vec<Vec<Value>> = rows_raw.iter().map(|row| {
+        row.as_array().unwrap_or(&vec![]).iter().map(|cell| {
+            match cell["type"].as_str() {
+                Some("integer") => cell["value"].as_str()
+                    .and_then(|s| s.parse::<i64>().ok())
+                    .map(|n| json!(n))
+                    .unwrap_or(Value::Null),
+                Some("real") => cell["value"].as_str()
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .map(|n| json!(n))
+                    .unwrap_or(Value::Null),
+                Some("text") => cell["value"].clone(),
+                _ => Value::Null,
+            }
+        }).collect()
+    }).collect();
+
+    Ok(rows)
+}
+
+/// Risolve il championid di Turso dal nome (DDragon id).
+/// Ritorna None se non trovato.
+async fn turso_get_champion_id(champion_name: &str) -> Option<i64> {
+    let rows = turso_query(
+        "SELECT championid FROM championtbl WHERE LOWER(championname) = LOWER(?1) LIMIT 1",
+        vec![json!(champion_name)],
+    ).await.ok()?;
+    rows.into_iter().next()?.into_iter().next()?.as_i64()
+}
+
+/// Struttura per la build dal DB.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DbBuild {
+    pub primary_path_id: u32,
+    pub secondary_path_id: u32,
+    pub primary_path_name: String,
+    pub secondary_path_name: String,
+    pub keystone_id: u32,
+    pub primary_slot_ids: Vec<u32>,  // [slot1, slot2, slot3] rune primarie (escluso keystone)
+    pub secondary_rune_ids: Vec<u32>, // [runa1, runa2] rune secondarie più frequenti
+    pub items: Vec<u32>,
+    pub sample_size: u32,
+}
+
+fn path_id_to_name(id: u32) -> &'static str {
+    match id {
+        8000 => "Precision",
+        8100 => "Domination",
+        8200 => "Sorcery",
+        8400 => "Resolve",
+        8300 => "Inspiration",
+        _ => "Unknown",
+    }
+}
+
+/// Recupera la build da Turso (primary/secondary path, keystone, item più frequenti)
+/// per champion_id e lane. Richiede almeno 5 partite campione.
+async fn turso_get_db_build(champion_id: i64, lane: &str) -> Option<DbBuild> {
+    let norm_lane = match lane.to_uppercase().as_str() {
+        "TOP"                     => "TOP",
+        "JUNGLE"                  => "JUNGLE",
+        "MIDDLE"|"MID"            => "MIDDLE",
+        "BOTTOM"|"BOT"|"ADC"      => "BOTTOM",
+        "SUPPORT"|"UTILITY"       => "UTILITY",
+        _                         => "MIDDLE",
+    }.to_string();
+
+    // ── Cache check ──────────────────────────────────────────────────────────
+    {
+        let cache = db_build_cache().await.read().await;
+        if let Some(cached) = cache.get(&(champion_id, norm_lane.clone())) {
+            eprintln!("[RLP DB] cache HIT champion_id={} lane={}", champion_id, norm_lane);
+            return Some(cached.clone());
+        }
+    }
+    eprintln!("[RLP DB] cache MISS champion_id={} lane={} — querying Turso", champion_id, norm_lane);
+
+    // ── Query unica: keystone + path counts + slot1/2/3 + secondary + items ─
+    // Tutto in un solo round-trip HTTP verso Turso usando subquery e aggregazioni.
+    // Struttura risultato (1 riga):
+    //   0  keystone        (MODE: keystone piu frequente)
+    //   1  cnt             (numero partite)
+    //   2  prec_ks         path precision count (dai keystone)
+    //   3  dom_ks
+    //   4  sorc_ks
+    //   5  insp_ks
+    //   6  res_ks
+    //   7  slot1           (primaryslot1 piu frequente)
+    //   8  slot2
+    //   9  slot3
+    //   10 sec_prec        (secondary path counts)
+    //   11 sec_dom
+    //   12 sec_sorc
+    //   13 sec_insp
+    //   14 sec_res
+    //   15 sec_rune_a      (top2 rune secondarie)
+    //   16 sec_rune_b
+    //   17..25 item0..item8 (top9 item per frequenza)
+    let rows = turso_query(
+        "WITH base AS (
+            SELECT ms.primarykeystone, ms.primaryslot1, ms.primaryslot2, ms.primaryslot3,
+                   ms.secondaryslot1,  ms.secondaryslot2,
+                   ms.item1, ms.item2, ms.item3, ms.item4, ms.item5, ms.item6
+            FROM matchstatstbl ms
+            JOIN summonermatchtbl sm ON sm.summonermatchid = ms.summonermatchfk
+            WHERE sm.championfk = ?1 AND UPPER(ms.lane) = ?2
+        ),
+        ks AS (
+            SELECT primarykeystone as ks, COUNT(*) as cnt
+            FROM base GROUP BY primarykeystone ORDER BY cnt DESC LIMIT 1
+        ),
+        s1 AS (
+            SELECT primaryslot1 as v FROM base WHERE primaryslot1 > 0
+            GROUP BY primaryslot1 ORDER BY COUNT(*) DESC LIMIT 1
+        ),
+        s2 AS (
+            SELECT primaryslot2 as v FROM base WHERE primaryslot2 > 0
+            GROUP BY primaryslot2 ORDER BY COUNT(*) DESC LIMIT 1
+        ),
+        s3 AS (
+            SELECT primaryslot3 as v FROM base WHERE primaryslot3 > 0
+            GROUP BY primaryslot3 ORDER BY COUNT(*) DESC LIMIT 1
+        ),
+        sec_counts AS (
+            SELECT
+                SUM(CASE WHEN secondaryslot1 BETWEEN 8000 AND 8099 OR secondaryslot2 BETWEEN 8000 AND 8099 THEN 1 ELSE 0 END) as sp,
+                SUM(CASE WHEN secondaryslot1 BETWEEN 8100 AND 8199 OR secondaryslot2 BETWEEN 8100 AND 8199 THEN 1 ELSE 0 END) as sd,
+                SUM(CASE WHEN secondaryslot1 BETWEEN 8200 AND 8299 OR secondaryslot2 BETWEEN 8200 AND 8299 THEN 1 ELSE 0 END) as ss,
+                SUM(CASE WHEN secondaryslot1 BETWEEN 8300 AND 8399 OR secondaryslot2 BETWEEN 8300 AND 8399 THEN 1 ELSE 0 END) as si,
+                SUM(CASE WHEN secondaryslot1 BETWEEN 8400 AND 8499 OR secondaryslot2 BETWEEN 8400 AND 8499 THEN 1 ELSE 0 END) as sr
+            FROM base
+        ),
+        all_sec AS (
+            SELECT secondaryslot1 as rune_id FROM base WHERE secondaryslot1 > 0
+            UNION ALL
+            SELECT secondaryslot2 FROM base WHERE secondaryslot2 > 0
+        ),
+        top_sec AS (
+            SELECT rune_id, COUNT(*) as cnt FROM all_sec
+            GROUP BY rune_id ORDER BY cnt DESC LIMIT 2
+        ),
+        all_items AS (
+            SELECT item1 as item_id FROM base WHERE item1 > 1000 AND item1 < 500000
+            UNION ALL SELECT item2 FROM base WHERE item2 > 1000 AND item2 < 500000
+            UNION ALL SELECT item3 FROM base WHERE item3 > 1000 AND item3 < 500000
+            UNION ALL SELECT item4 FROM base WHERE item4 > 1000 AND item4 < 500000
+            UNION ALL SELECT item5 FROM base WHERE item5 > 1000 AND item5 < 500000
+            UNION ALL SELECT item6 FROM base WHERE item6 > 1000 AND item6 < 500000
+        ),
+        top_items AS (
+            SELECT item_id, COUNT(*) as cnt FROM all_items
+            GROUP BY item_id ORDER BY cnt DESC LIMIT 9
+        )
+        SELECT
+            ks.ks, ks.cnt,
+            SUM(CASE WHEN ks.ks BETWEEN 8000 AND 8099 THEN 1 ELSE 0 END),
+            SUM(CASE WHEN ks.ks BETWEEN 8100 AND 8199 THEN 1 ELSE 0 END),
+            SUM(CASE WHEN ks.ks BETWEEN 8200 AND 8299 THEN 1 ELSE 0 END),
+            SUM(CASE WHEN ks.ks BETWEEN 8300 AND 8399 THEN 1 ELSE 0 END),
+            SUM(CASE WHEN ks.ks BETWEEN 8400 AND 8499 THEN 1 ELSE 0 END),
+            COALESCE((SELECT v FROM s1), 0),
+            COALESCE((SELECT v FROM s2), 0),
+            COALESCE((SELECT v FROM s3), 0),
+            (SELECT sp FROM sec_counts),
+            (SELECT sd FROM sec_counts),
+            (SELECT ss FROM sec_counts),
+            (SELECT si FROM sec_counts),
+            (SELECT sr FROM sec_counts),
+            COALESCE((SELECT rune_id FROM top_sec ORDER BY cnt DESC LIMIT 1 OFFSET 0), 0),
+            COALESCE((SELECT rune_id FROM top_sec ORDER BY cnt DESC LIMIT 1 OFFSET 1), 0),
+            COALESCE((SELECT item_id FROM top_items ORDER BY cnt DESC LIMIT 1 OFFSET 0), 0),
+            COALESCE((SELECT item_id FROM top_items ORDER BY cnt DESC LIMIT 1 OFFSET 1), 0),
+            COALESCE((SELECT item_id FROM top_items ORDER BY cnt DESC LIMIT 1 OFFSET 2), 0),
+            COALESCE((SELECT item_id FROM top_items ORDER BY cnt DESC LIMIT 1 OFFSET 3), 0),
+            COALESCE((SELECT item_id FROM top_items ORDER BY cnt DESC LIMIT 1 OFFSET 4), 0),
+            COALESCE((SELECT item_id FROM top_items ORDER BY cnt DESC LIMIT 1 OFFSET 5), 0),
+            COALESCE((SELECT item_id FROM top_items ORDER BY cnt DESC LIMIT 1 OFFSET 6), 0),
+            COALESCE((SELECT item_id FROM top_items ORDER BY cnt DESC LIMIT 1 OFFSET 7), 0),
+            COALESCE((SELECT item_id FROM top_items ORDER BY cnt DESC LIMIT 1 OFFSET 8), 0)
+        FROM ks",
+        vec![json!(champion_id), json!(norm_lane)],
+    ).await.ok()?;
+
+    let row = rows.first()?;
+    let get_i64 = |i: usize| row.get(i).and_then(|v| v.as_i64()).unwrap_or(0);
+    let get_u32 = |i: usize| get_i64(i) as u32;
+
+    let keystone_id  = get_u32(0);
+    let sample_size  = get_u32(1);
+
+    if sample_size < 5 {
+        eprintln!("[RLP DB] Sample size troppo piccolo ({}) per champion_id={}", sample_size, champion_id);
+        return None;
+    }
+
+    // Primary path dal keystone
+    let primary_path_id: u32 = match keystone_id {
+        8005|8008|8021|8010 => 8000,
+        8112|8124|8128|9923 => 8100,
+        8229|8230|8214      => 8200,
+        8437|8439|8465      => 8400,
+        8351|8360|8369      => 8300,
+        _ => {
+            let counts = [(8000u32, get_u32(2)), (8100, get_u32(3)), (8200, get_u32(4)),
+                          (8300, get_u32(5)), (8400, get_u32(6))];
+            counts.iter().max_by_key(|(_, c)| *c).map(|(p, _)| *p).unwrap_or(8000)
+        }
+    };
+
+    let slot1 = get_u32(7);
+    let slot2 = get_u32(8);
+    let slot3 = get_u32(9);
+    let primary_slot_ids = vec![slot1, slot2, slot3];
+
+    // Secondary path (escludi primary)
+    let sec_counts = [
+        (8000u32, get_u32(10)), (8100, get_u32(11)), (8200, get_u32(12)),
+        (8300, get_u32(13)),    (8400, get_u32(14)),
+    ];
+    let secondary_path_id = sec_counts.iter()
+        .filter(|(path, _)| *path != primary_path_id)
+        .max_by_key(|(_, c)| *c)
+        .map(|(p, _)| *p)
+        .unwrap_or(8100);
+
+    // Filtra le secondary rune per appartenenenza al secondary path
+    let sec_min = secondary_path_id;
+    let sec_max = secondary_path_id + 99;
+    let secondary_rune_ids: Vec<u32> = [get_u32(15), get_u32(16)]
+        .iter()
+        .copied()
+        .filter(|&id| id >= sec_min && id <= sec_max)
+        .collect();
+
+    // Items (filtra zeri)
+    let items: Vec<u32> = (17..=25)
+        .map(|i| get_u32(i))
+        .filter(|&id| id > 0)
+        .collect();
+
+    eprintln!("[RLP DB] build champion_id={} lane={}: primary={} sec={} keystone={} pri_slots={:?} sec_runes={:?} items={:?} sample={}",
+        champion_id, norm_lane, primary_path_id, secondary_path_id, keystone_id, primary_slot_ids, secondary_rune_ids, items, sample_size);
+
+    let build = DbBuild {
+        primary_path_id,
+        secondary_path_id,
+        primary_path_name: path_id_to_name(primary_path_id).to_string(),
+        secondary_path_name: path_id_to_name(secondary_path_id).to_string(),
+        keystone_id,
+        primary_slot_ids,
+        secondary_rune_ids,
+        items,
+        sample_size,
+    };
+
+    // ── Salva in cache ───────────────────────────────────────────────────────
+    {
+        let mut cache = db_build_cache().await.write().await;
+        cache.insert((champion_id, norm_lane), build.clone());
+    }
+
+    Some(build)
+}
 const PATCH: &str = "16.4.1";
 
 fn spell_name_to_id(name: &str) -> Option<u32> {
@@ -123,6 +438,38 @@ pub struct ImportResult {
     pub summoner_spells: Vec<String>,
     pub item_blocks: Option<usize>,
     pub errors: Vec<String>,
+    // ── Rune IDs completi OP.GG (per visualizzazione frontend) ───────────────
+    pub opgg_runes: Option<RunePageData>,
+    // ── Build alternativa dal DB ──────────────────────────────────────────────
+    pub db_build: Option<DbBuildResult>,
+}
+
+/// Dati completi di una pagina rune per il rendering frontend.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RunePageData {
+    pub champion_name: String,        // nome campione per il titolo pagina
+    pub primary_path_id: u32,
+    pub primary_path_name: String,
+    pub primary_rune_ids: Vec<u32>,   // [keystone, slot1, slot2, slot3]
+    pub secondary_path_id: u32,
+    pub secondary_path_name: String,
+    pub secondary_rune_ids: Vec<u32>, // [rune1, rune2]
+    pub stat_mod_ids: Vec<u32>,       // [offence, flex, defence]
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DbBuildResult {
+    pub primary_path_name: String,
+    pub secondary_path_name: String,
+    pub primary_path_id: u32,
+    pub secondary_path_id: u32,
+    pub keystone_id: u32,
+    /// Le 3 rune dello slot primario (slot1, slot2, slot3) più frequenti
+    pub primary_slot_ids: Vec<u32>,
+    /// Le 2 rune secondarie più frequenti dal DB
+    pub secondary_rune_ids: Vec<u32>,
+    pub items_imported: bool,
+    pub sample_size: u32,
 }
 
 /// Cerca il lockfile di League su tutte le lettere di drive possibili (C→Z).
@@ -626,11 +973,12 @@ fn parse_opgg_response(text: &str) -> Result<Value, String> {
     }))
 }
 
-async fn import_runes(lcu: &LcuClient, champion: &str, position: &str, build: &Value) -> Result<(String,String),String> {
+async fn import_runes(lcu: &LcuClient, champion: &str, position: &str, build: &Value) -> Result<(String, String, RunePageData), String> {
     let rune_data = build.pointer("/data/runes").or_else(|| build.get("runes")).ok_or("Rune non trovate")?;
     let primary_id = rune_data["primary_page_id"].as_u64().map(|n| n as u32).unwrap_or(8000);
     let sub_id = rune_data["sub_page_id"].as_u64().map(|n| n as u32).unwrap_or(8100);
-    let primary_path_name = rune_data["primary_page_id"].as_str().unwrap_or("Precision");
+    let primary_path_name = path_id_to_name(primary_id).to_string();
+    let sub_path_name = path_id_to_name(sub_id).to_string();
     let primary_ids: Vec<u32> = rune_data["primary_rune_ids"].as_array().unwrap_or(&vec![]).iter().filter_map(|v| v.as_u64().map(|n| n as u32)).collect();
     let sub_ids: Vec<u32> = rune_data["sub_rune_ids"].as_array().unwrap_or(&vec![]).iter().filter_map(|v| v.as_u64().map(|n| n as u32)).collect();
     let stat_ids: Vec<u32> = rune_data["stat_mod_ids"].as_array().map(|a| a.iter().filter_map(|v| v.as_u64().map(|n| n as u32)).collect()).unwrap_or_else(|| vec![5008,5008,5002]);
@@ -650,8 +998,6 @@ async fn import_runes(lcu: &LcuClient, champion: &str, position: &str, build: &V
     perks.extend_from_slice(&sub_ids);
     perks.extend_from_slice(&stat_ids);
     
-    // Usa post_status invece di post: il LCU in URF/ARAM risponde con body vuoto (non JSON),
-    // quindi controllare solo lo status code HTTP è l'unico modo affidabile.
     let status = lcu.post_status("/lol-perks/v1/pages", &json!({
         "name": page_name, "primaryStyleId": primary_id, "subStyleId": sub_id,
         "selectedPerkIds": perks, "current": true
@@ -661,7 +1007,91 @@ async fn import_runes(lcu: &LcuClient, champion: &str, position: &str, build: &V
     if status < 200 || status >= 300 {
         return Err(format!("Il client ha rifiutato la pagina rune (HTTP {})", status));
     }
-    Ok((page_name, primary_path_name.to_string()))
+
+    let rune_page = RunePageData {
+        champion_name: champion.to_string(),
+        primary_path_id: primary_id,
+        primary_path_name: primary_path_name.clone(),
+        primary_rune_ids: primary_ids,
+        secondary_path_id: sub_id,
+        secondary_path_name: sub_path_name,
+        secondary_rune_ids: sub_ids,
+        stat_mod_ids: stat_ids,
+    };
+    Ok((page_name, primary_path_name, rune_page))
+}
+
+/// Tauri command: applica una pagina rune già costruita nel client LoL.
+/// Usato dal frontend quando l'utente cambia tab OP.GG ↔ Dataset RLP.
+#[tauri::command]
+pub async fn apply_rune_page(rune_data: RunePageData) -> Result<(), String> {
+    let lcu = LcuClient::new().ok_or("Client LoL non disponibile")?;
+
+    let page_name = format!("RLP {} {} {}", rune_data.champion_name, rune_data.primary_path_name, rune_data.secondary_path_name);
+
+    // Elimina la pagina esistente con lo stesso nome (o la prima deletable)
+    let pages: Vec<Value> = lcu.get("/lol-perks/v1/pages")
+        .await
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default();
+    let editable: Vec<&Value> = pages.iter()
+        .filter(|p| p["isDeletable"].as_bool().unwrap_or(false))
+        .collect();
+    let del_id = editable.iter()
+        .find(|p| p["name"].as_str().unwrap_or("") == page_name)
+        .or_else(|| editable.first())
+        .and_then(|p| p["id"].as_u64());
+
+    if let Some(id) = del_id {
+        let _ = lcu.client
+            .delete(&format!("https://127.0.0.1:{}/lol-perks/v1/pages/{}", lcu.port, id))
+            .header("Authorization", format!("Basic {}", lcu.auth))
+            .send().await;
+    }
+
+    // Il LCU richiede esattamente 9 selectedPerkIds:
+    //   [keystone, p_slot1, p_slot2, p_slot3,  ← 4 primary
+    //    s_slot1, s_slot2,                      ← 2 secondary
+    //    stat_off, stat_flex, stat_def]          ← 3 stat mods
+    //
+    // Le build DB hanno solo keystone (primary_rune_ids=[keystone]) e 2 secondary.
+    // I 3 slot primari mancanti e i 3 stat mods si paddano con 0 / default.
+
+    // Primary: keystone + 3 slot (0 = non selezionato, accettato dal LCU)
+    let mut primary_perks = rune_data.primary_rune_ids.clone();
+    while primary_perks.len() < 4 { primary_perks.push(0); }
+
+    // Secondary: 2 slot (0 se mancanti)
+    let mut secondary_perks = rune_data.secondary_rune_ids.clone();
+    while secondary_perks.len() < 2 { secondary_perks.push(0); }
+
+    // Stat mods: 3 slot — default Adaptive/Adaptive/Armor se non specificati
+    let stat_perks: Vec<u32> = if rune_data.stat_mod_ids.len() >= 3 {
+        rune_data.stat_mod_ids[..3].to_vec()
+    } else {
+        vec![5008, 5008, 5002] // Adaptive Force, Adaptive Force, Armor
+    };
+
+    let mut perks: Vec<u32> = Vec::with_capacity(9);
+    perks.extend_from_slice(&primary_perks[..4]);
+    perks.extend_from_slice(&secondary_perks[..2]);
+    perks.extend_from_slice(&stat_perks[..3]);
+
+    eprintln!("[RLP] apply_rune_page '{}' perks={:?}", page_name, perks);
+
+    let status = lcu.post_status("/lol-perks/v1/pages", &json!({
+        "name": page_name,
+        "primaryStyleId": rune_data.primary_path_id,
+        "subStyleId": rune_data.secondary_path_id,
+        "selectedPerkIds": perks,
+        "current": true,
+    })).await.map_err(|e| format!("HTTP error apply_rune_page: {}", e))?;
+
+    eprintln!("[RLP] apply_rune_page '{}' → HTTP {}", page_name, status);
+    if status < 200 || status >= 300 {
+        return Err(format!("Il client ha rifiutato la pagina rune (HTTP {})", status));
+    }
+    Ok(())
 }
 
 async fn import_summoners(lcu: &LcuClient, build: &Value) -> Result<Vec<String>,String> {
@@ -763,6 +1193,47 @@ async fn import_item_set(_lcu: &LcuClient, champion: &str, position: &str, build
 
     eprintln!("[RLP] item-set written: {:?} ({} blocks)", file_path, count);
     Ok(count)
+}
+
+/// Costruisce il JSON di un item set dal DB (lista flat di item id).
+fn build_db_item_set_value(champion: &str, title: &str, item_ids: &[u32]) -> Value {
+    let _ = champion;
+    let items: Vec<Value> = item_ids.iter()
+        .map(|&id| json!({"id": id.to_string(), "count": 1}))
+        .collect();
+    json!({
+        "title": title,
+        "type": "custom",
+        "map": "any",
+        "mode": "any",
+        "priority": false,
+        "sortrank": 2,
+        "blocks": [{
+            "type": "Build DB (RLP dataset)",
+            "recMath": false,
+            "minSummonerLevel": -1,
+            "maxSummonerLevel": -1,
+            "showIfSummonerSpell": "",
+            "hideIfSummonerSpell": "",
+            "items": items
+        }]
+    })
+}
+
+/// Scrive un item set JSON nella cartella League Config/Champions/<champion>/Recommended/.
+async fn write_item_set_file(champion: &str, item_set: &Value, label: &str) -> Result<(), String> {
+    let config_path = get_league_config_path()
+        .ok_or("Cartella League of Legends non trovata")?
+        .join(champion)
+        .join("Recommended");
+    fs::create_dir_all(&config_path).map_err(|e| format!("mkdir error: {}", e))?;
+    let filename = format!("RLP_{}.json",
+        label.replace(' ', "_").replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_"));
+    let file_path = config_path.join(&filename);
+    let json_str = serde_json::to_string_pretty(item_set).map_err(|e| e.to_string())?;
+    fs::write(&file_path, &json_str).map_err(|e| format!("write error: {}", e))?;
+    eprintln!("[RLP DB] item-set scritto: {:?}", file_path);
+    Ok(())
 }
 
 /// Per URF/ARAM: fetch parallelo delle build per le 4 lane principali usando ranked come workaround.
@@ -877,7 +1348,8 @@ pub async fn auto_import_build(champion_name: String, assigned_position: String,
     eprintln!("[RLP] auto_import_build: {} {} mode={}", champion_name, assigned_position, game_mode);
     let mut result = ImportResult {
         runes_imported:false, summoners_imported:false, items_imported:false,
-        rune_page_name:None, primary_path:None, summoner_spells:Vec::new(), item_blocks:None, errors:Vec::new(),
+        rune_page_name:None, primary_path:None, summoner_spells:Vec::new(), item_blocks:None,
+        errors:Vec::new(), opgg_runes: None, db_build: None,
     };
     
     let lcu = match LcuClient::new() {
@@ -903,6 +1375,14 @@ pub async fn auto_import_build(champion_name: String, assigned_position: String,
     let puuid = summoner["puuid"].as_str().unwrap_or("").to_string();
     eprintln!("[RLP] summoner puuid={}", puuid);
 
+    // ── Fetch build dal DB Turso (in parallelo con OP.GG) ────────────────────
+    let db_champion_name = champion_name.clone();
+    let db_position = assigned_position.clone();
+    let db_handle = tokio::spawn(async move {
+        let champ_id = turso_get_champion_id(&db_champion_name).await?;
+        turso_get_db_build(champ_id, &db_position).await
+    });
+
     if mode == "ranked" || mode == "flex" {
         // ── RANKED / FLEX: build singola per la lane assegnata ────────────────
         let build = match opgg_get_champion_build(&champion_name, &assigned_position, mode).await {
@@ -911,7 +1391,12 @@ pub async fn auto_import_build(champion_name: String, assigned_position: String,
         };
 
         match import_runes(&lcu, &champion_name, mode_label, &build).await {
-            Ok((name,path)) => { result.runes_imported=true; result.rune_page_name=Some(name); result.primary_path=Some(path); }
+            Ok((name, path, rune_page)) => {
+                result.runes_imported = true;
+                result.rune_page_name = Some(name);
+                result.primary_path = Some(path);
+                result.opgg_runes = Some(rune_page);
+            }
             Err(e) => result.errors.push(format!("Rune: {}", e)),
         }
         match import_summoners(&lcu, &build).await {
@@ -922,9 +1407,33 @@ pub async fn auto_import_build(champion_name: String, assigned_position: String,
             Ok(blocks) => { result.items_imported=true; result.item_blocks=Some(blocks); }
             Err(e) => result.errors.push(format!("Item set: {}", e)),
         }
+
+        // ── Build alternativa dal DB ──────────────────────────────────────────
+        if let Ok(Some(db)) = db_handle.await {
+            // Crea item set separato "[DB] RLP Champion LANE"
+            let db_label = format!("[DB] RLP {} {}", champion_name, assigned_position);
+            let db_build_value = build_db_item_set_value(&champion_name, &db_label, &db.items);
+            let db_items_ok = match write_item_set_file(&champion_name, &db_build_value, &db_label).await {
+                Ok(_) => { eprintln!("[RLP DB] item set scritto: {}", db_label); true }
+                Err(e) => { result.errors.push(format!("DB item set: {}", e)); false }
+            };
+            result.db_build = Some(DbBuildResult {
+                primary_path_name: db.primary_path_name,
+                secondary_path_name: db.secondary_path_name,
+                primary_path_id: db.primary_path_id,
+                secondary_path_id: db.secondary_path_id,
+                keystone_id: db.keystone_id,
+                primary_slot_ids: db.primary_slot_ids,
+                secondary_rune_ids: db.secondary_rune_ids,
+                items_imported: db_items_ok,
+                sample_size: db.sample_size,
+            });
+        } else {
+            eprintln!("[RLP DB] Nessuna build DB trovata (sample insufficiente o champion non trovato)");
+        }
     } else {
         // ── URF / ARAM / altre modalità: fetch parallelo per tutte le lane ────
-        // L'API OP.GG non accetta game_mode=urf/aram; usiamo ranked come workaround.
+        let _ = db_handle; // non usiamo il db_handle in queste modalità
         eprintln!("[RLP] mode={} → multi-lane fetch", mode);
         let lane_builds = opgg_get_builds_multi_lane(&champion_name).await;
 
@@ -940,7 +1449,12 @@ pub async fn auto_import_build(champion_name: String, assigned_position: String,
         if let Some((rune_lane, build)) = rune_build {
             let rune_label = format!("{} {}", mode_label, rune_lane);
             match import_runes(&lcu, &champion_name, &rune_label, build).await {
-                Ok((name,path)) => { result.runes_imported=true; result.rune_page_name=Some(name); result.primary_path=Some(path); }
+                Ok((name, path, rune_page)) => {
+                    result.runes_imported = true;
+                    result.rune_page_name = Some(name);
+                    result.primary_path = Some(path);
+                    result.opgg_runes = Some(rune_page);
+                }
                 Err(e) => result.errors.push(format!("Rune: {}", e)),
             }
         }

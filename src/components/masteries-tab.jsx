@@ -4,23 +4,15 @@ import { Card } from "./ui/card";
 import { Badge } from "./ui/badge";
 import { Loader2, Star } from "lucide-react";
 import { PATCH } from "./constants";
+import { getChampionMap } from "./utils";
 
-// Mappa champion key (numero stringa) → nome DDragon
+// Mappa champion key (numero stringa) → nome DDragon — usa singleton condiviso
 function useChampKeyMap() {
     const [map, setMap] = useState({});
     useEffect(() => {
-        fetch(`https://ddragon.leagueoflegends.com/cdn/${PATCH}/data/en_US/champion.json`)
-            .then(r => r.json())
-            .then(json => {
-                const m = {};
-                if (json?.data) {
-                    for (const [name, info] of Object.entries(json.data)) {
-                        m[String(info.key)] = name;
-                    }
-                }
-                setMap(m);
-            })
-            .catch(() => {});
+        let cancelled = false;
+        getChampionMap().then(({ byKey }) => { if (!cancelled) setMap(byKey); });
+        return () => { cancelled = true; };
     }, []);
     return map;
 }
