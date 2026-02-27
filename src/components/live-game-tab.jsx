@@ -97,7 +97,7 @@ function calcGameTime(data, elapsed) {
     return (data?.game_time ?? 0) + elapsed;
 }
 
-// Hook champion id → name
+// Hook champion id (intero) → nome DDragon
 function useChampIdMap() {
     const [map, setMap] = useState({});
     useEffect(() => {
@@ -116,7 +116,6 @@ function useChampIdMap() {
     }, []);
     return map;
 }
-
 // ── Sotto-componenti ──────────────────────────────────────────────────────────
 
 function RankBadge({ tier, rank, lp }) {
@@ -174,15 +173,8 @@ function BanRow({ bans, champIdMap, side }) {
 
 // ── Badge helpers ─────────────────────────────────────────────────────────────
 
-const ROLE_LABEL = {
-    TOP: "Top", JUNGLE: "Jungle", MIDDLE: "Mid", BOTTOM: "Bot", UTILITY: "Support",
-    SUPPORT: "Support", MID: "Mid", ADC: "Bot", FILL: "Fill",
-};
-
-/**
- * Normalizza la lane (da API spectator o LCD) in una chiave uniforme.
- */
-function normalizeRole(raw) {
+// ROLE_LABEL e normalizeRole rimossi (smart badges disabilitati)
+function normalizeRole(raw) { // mantenuta per eventuali usi futuri
     if (!raw) return null;
     const u = raw.toUpperCase().replace(/[^A-Z]/g, "");
     if (u === "TOP") return "TOP";
@@ -193,102 +185,13 @@ function normalizeRole(raw) {
     return null;
 }
 
-/**
- * Genera i badge extra per un giocatore.
- * Dati opzionali che il backend può fornire:
- *   player.summoner_level    → number (1-89 = smurf)
- *   player.main_role         → string (es. "TOP", "JUNGLE" …)
- *   player.current_role      → string (lane assegnata in questa partita)
- *   player.main_champion     → string (nome DDragon del champ principale)
- *   player.games_on_champion → number (partite sul champ attuale, usato per OTP detection)
- *   player.total_games       → number (partite totali, usato per OTP detection)
- *   bannedChampions          → array of champName strings (ban del match)
- */
-function buildPlayerBadges(player, champName, bannedChampions = []) {
-    const badges = [];
+// buildPlayerBadges e SmartBadge disabilitati — troppo lenti (API call per player)
+// function buildPlayerBadges(...) { ... }
+// function SmartBadge(...) { ... }
 
-    // ── 1. Possibile smurf (livello account 1-89) ──────────────────────────
-    const lvl = player.summoner_level;
-    if (lvl != null && lvl >= 1 && lvl <= 89) {
-        badges.push({
-            key: "smurf",
-            label: `Lv.${lvl} · Possibile smurf`,
-            color: "bg-orange-900/60 text-orange-300 border-orange-700/50",
-            title: `Livello account: ${lvl}`,
-        });
-    }
-
-    // ── 2. Fuori posizione ────────────────────────────────────────────────
-    const mainRole = normalizeRole(player.main_role);
-    const currentRole = normalizeRole(player.current_role);
-    if (mainRole && currentRole && mainRole !== currentRole) {
-        const mainLabel = ROLE_LABEL[mainRole] ?? mainRole;
-        const curLabel = ROLE_LABEL[currentRole] ?? currentRole;
-        badges.push({
-            key: "offrole",
-            label: `Off-role (main: ${mainLabel})`,
-            color: "bg-yellow-900/60 text-yellow-300 border-yellow-700/50",
-            title: `Main: ${mainLabel} · Gioca: ${curLabel}`,
-        });
-    } else if (mainRole && !currentRole) {
-        // Mostriamo solo la lane principale come info
-        const mainLabel = ROLE_LABEL[mainRole] ?? mainRole;
-        badges.push({
-            key: "mainrole",
-            label: `Main ${mainLabel}`,
-            color: "bg-[#0a1e4a]/60 text-[#7dd8ff] border-[#1a3558]",
-            title: `Lane principale: ${mainLabel}`,
-        });
-    }
-
-    // ── 3a. OTP detection ─────────────────────────────────────────────────
-    const gamesOnChamp = player.games_on_champion ?? 0;
-    const totalGames = player.total_games ?? 0;
-    const isOtp = (gamesOnChamp >= 50) || (totalGames > 0 && gamesOnChamp / totalGames >= 0.4 && gamesOnChamp >= 20);
-    if (isOtp && champName) {
-        badges.push({
-            key: "otp",
-            label: `OTP ${champName}`,
-            color: "bg-purple-900/60 text-purple-300 border-purple-700/50",
-            title: `${gamesOnChamp} partite su ${champName}`,
-        });
-    }
-
-    // ── 3b. Main bannato ──────────────────────────────────────────────────
-    const mainChamp = player.main_champion;
-    if (mainChamp && !isOtp) {
-        const isBanned = bannedChampions.some(b =>
-            b?.toLowerCase() === mainChamp.toLowerCase()
-        );
-        if (isBanned) {
-            badges.push({
-                key: "mainbanned",
-                label: `Main bannato (${mainChamp})`,
-                color: "bg-red-900/60 text-red-300 border-red-700/50",
-                title: `${mainChamp} è stato bannato`,
-            });
-        }
-    }
-
-    return badges;
-}
-
-function SmartBadge({ badge }) {
-    return (
-        <span
-            title={badge.title}
-            className={`text-[11px] font-semibold px-1.5 py-0.5 rounded border shrink-0 ${badge.color}`}
-        >
-            {badge.label}
-        </span>
-    );
-}
-
-function PlayerRow({ player, champIdMap, side, duoWith, bannedChampions }) {
+function PlayerRow({ player, champIdMap, side }) {
     const isLeft = side === "ORDER";
-    // champion_name può essere già il nome DDragon (Spectator) oppure il nome esteso LCD
     const champName = normalizeLcdChampName(player.champion_name) || champIdMap[player.champion_id] || "";
-    const smartBadges = buildPlayerBadges(player, champName, bannedChampions);
 
     return (
         <div className={`flex items-center gap-3 py-2.5 px-3 rounded-xl transition-colors
@@ -346,11 +249,7 @@ function PlayerRow({ player, champIdMap, side, duoWith, bannedChampions }) {
                         ${player.is_me ? "text-[#7dd8ff]" : "text-white"}`}>
                         {player.summoner_name || "—"}
                     </p>
-                    {duoWith && (
-                        <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-pink-900/60 text-pink-300 border border-pink-700/50 shrink-0" title={`Duo con ${duoWith}`}>
-                            DUO
-                        </span>
-                    )}
+
                 </div>
                 {/* Riga 2: champion name + rank */}
                 <div className={`flex items-center gap-2 mt-0.5 flex-wrap ${isLeft ? "" : "justify-end"}`}>
@@ -359,20 +258,13 @@ function PlayerRow({ player, champIdMap, side, duoWith, bannedChampions }) {
                     )}
                     <RankBadge tier={player.tier} rank={player.rank} lp={player.lp} />
                 </div>
-                {/* Riga 3: smart badges */}
-                {smartBadges.length > 0 && (
-                    <div className={`flex items-center gap-1 mt-1 flex-wrap ${isLeft ? "" : "justify-end"}`}>
-                        {smartBadges.map(b => (
-                            <SmartBadge key={b.key} badge={b} isLeft={isLeft} />
-                        ))}
-                    </div>
-                )}
+
             </div>
         </div>
     );
 }
 
-function TeamPanel({ players, bans, side, champIdMap, duoMap, allBannedChampNames }) {
+function TeamPanel({ players, bans, side, champIdMap }) {
     const isOrder = side === "ORDER";
     const dotColor = isOrder ? "bg-[#2278ff]" : "bg-red-500";
     const label = isOrder ? "TEAM BLU" : "TEAM ROSSO";
@@ -403,7 +295,7 @@ function TeamPanel({ players, bans, side, champIdMap, duoMap, allBannedChampName
 
             <div className="space-y-1 mt-3">
                 {players.map((p, i) => (
-                    <PlayerRow key={i} player={p} champIdMap={champIdMap} side={side} duoWith={duoMap?.[p.puuid]} bannedChampions={allBannedChampNames} />
+                    <PlayerRow key={i} player={p} champIdMap={champIdMap} side={side} />
                 ))}
                 {players.length === 0 && (
                     <p className="text-[#2a5070] text-xs text-center py-4">Nessun giocatore</p>
@@ -415,7 +307,7 @@ function TeamPanel({ players, bans, side, champIdMap, duoMap, allBannedChampName
 
 // ── Tab principale ────────────────────────────────────────────────────────────
 
-export function LiveGameTab({ puuidOverride = null, myPuuid = null }) {
+export function LiveGameTab({ puuidOverride = null, myPuuid = null, onStatusChange = null }) {
     const [data, setData] = useState(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
@@ -427,9 +319,9 @@ export function LiveGameTab({ puuidOverride = null, myPuuid = null }) {
     const pollRef = useRef(null);
     const tickRef = useRef(null);
 
-    // Se abbiamo un puuidOverride usiamo check_live_game (Spectator V5, funziona per tutti).
-    // get_live_game viene usato SOLO se non c'è nessun puuid (LCD locale puro, senza account info).
-    const isSelf = !puuidOverride;
+    // isSelf = true quando non c'è puuid O quando il puuid è il proprio.
+    // In entrambi i casi usiamo get_live_game (LCD locale + Spectator, più completo).
+    const isSelf = !puuidOverride || (myPuuid != null && puuidOverride === myPuuid);
 
     const fetchData = useCallback(async () => {
         // Blocca il fetch se puuidOverride non è ancora pronto (evita flash "non in partita")
@@ -445,12 +337,14 @@ export function LiveGameTab({ puuidOverride = null, myPuuid = null }) {
             }
             setData(res);
             setError(null);
+            if (onStatusChange) onStatusChange(res?.in_game === true);
             if (res?.in_game) {
                 setElapsed(0);
             }
         } catch (e) {
             const msg = String(e);
             setError(msg.includes("CLIENT_CLOSED") ? "client_closed" : msg);
+            if (onStatusChange) onStatusChange(false);
             setData(null);
         } finally {
             setLoading(false);
@@ -537,35 +431,11 @@ export function LiveGameTab({ puuidOverride = null, myPuuid = null }) {
     const bansOrder = (data.banned_champions ?? []).filter(b => b.team === "ORDER");
     const bansChaos = (data.banned_champions ?? []).filter(b => b.team === "CHAOS");
 
-    // Tutti i nomi dei campioni bannati (per "Main bannato")
-    const allBannedChampNames = (data.banned_champions ?? [])
-        .filter(b => b.champion_id > 0)
-        .map(b => champIdMap[b.champion_id])
-        .filter(Boolean);
-
     // Timer: preferisce game_start_time (preciso), fallback game_time + elapsed
     const gameTimeSec = calcGameTime(data, elapsed);
     void tick; // usato per forzare re-render ogni secondo
 
-    // ── Duo detection ────────────────────────────────────────────────────────
-    // Trova il giocatore "me" e cerca chi appare spesso nella sua match history
-    // Per ora usa una logica semplice: due giocatori dello stesso team con stesso
-    // profileIconId o segnalati come duo dall'API (non disponibile) →
-    // Rilevamento da match history passata tramite prop (futuro).
-    // Per il momento segniamo come potenziale duo chi ha puuid nel duo_pairs (se presenti).
-    const duoMap = {}; // puuid → nome del duo partner
-    const myPlayer = data.players.find(p => p.is_me);
-    if (myPlayer && data.duo_pairs) {
-        for (const [a, b] of (data.duo_pairs ?? [])) {
-            if (a === myPlayer.puuid) {
-                const partner = data.players.find(p => p.puuid === b);
-                if (partner) { duoMap[b] = partner.summoner_name; duoMap[a] = myPlayer.summoner_name; }
-            } else if (b === myPlayer.puuid) {
-                const partner = data.players.find(p => p.puuid === a);
-                if (partner) { duoMap[a] = partner.summoner_name; duoMap[b] = myPlayer.summoner_name; }
-            }
-        }
-    }
+    // Duo detection disabilitata
 
     return (
         <div className="space-y-4">
@@ -602,28 +472,14 @@ export function LiveGameTab({ puuidOverride = null, myPuuid = null }) {
 
             {/* Teams: griglia 2 colonne su schermi larghi, altrimenti verticale */}
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-                <TeamPanel
-                    players={order}
-                    bans={bansOrder}
-                    side="ORDER"
-                    champIdMap={champIdMap}
-                    duoMap={duoMap}
-                    allBannedChampNames={allBannedChampNames}
-                />
-                <TeamPanel
-                    players={chaos}
-                    bans={bansChaos}
-                    side="CHAOS"
-                    champIdMap={champIdMap}
-                    duoMap={duoMap}
-                    allBannedChampNames={allBannedChampNames}
-                />
+                <TeamPanel players={order} bans={bansOrder} side="ORDER" champIdMap={champIdMap} />
+                <TeamPanel players={chaos} bans={bansChaos} side="CHAOS" champIdMap={champIdMap} />
             </div>
 
             <p className="text-center text-slate-700 text-xs pb-1">
                 {data._source === "lcd"
                     ? "Live Client Data API (porta 2999) · aggiornamento ogni 30s"
-                    : "Riot Spectator-V5 · aggiornamento ogni 30s"}
+                    : "Riot Spectator · aggiornamento ogni 30s"}
             </p>
         </div>
     );

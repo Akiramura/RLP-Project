@@ -5,471 +5,213 @@ use tauri::{AppHandle, Manager};
 use base64::{engine::general_purpose, Engine as _};
 use reqwest::Client;
 use tokio::sync::OnceCell;
-use deadpool_postgres::{Config, Pool, Runtime, ManagerConfig, RecyclingMethod};
-use native_tls::TlsConnector;
-use postgres_native_tls::MakeTlsConnector;
+use std::collections::{HashSet, HashMap};
+use tokio::sync::RwLock;
 
 // ── Cargo.toml dependencies needed ──────────────────────────────────────────
-// deadpool-postgres = { version = "0.14", features = ["rt_tokio_1"] }
-// tokio-postgres    = { version = "0.7" }
-// postgres-native-tls = "0.5"
-// native-tls        = "0.2"
-// dotenvy           = "0.15"
+// reqwest    = { version = "0.12", features = ["json"] }
+// serde_json = "1"
+// tokio      = { version = "1", features = ["full"] }
+// chrono     = { version = "0.4", features = ["serde"] }
+// base64     = "0.22"
+// (Turso via HTTP puro — nessuna dipendenza nativa extra, solo reqwest)
 // ────────────────────────────────────────────────────────────────────────────
 
 mod champ_select;
-use champ_select::{get_champ_select_session, auto_import_build, debug_champ_select_slot};
+use champ_select::{get_champ_select_session, auto_import_build, debug_champ_select_slot, apply_rune_page};
 
 const OPGG_MCP_URL: &str = "https://mcp-api.op.gg/mcp";
 
-/// RIOT_API_KEY compilata dentro il binario al momento della build.
-/// Impostala come variabile d'ambiente prima di `npm run tauri build`
-/// oppure tramite .cargo/config.toml (non va committato su git).
 fn riot_api_key() -> &'static str {
     env!("RIOT_API_KEY")
 }
 
-use std::collections::HashSet;
-use tokio::sync::RwLock;
+// ── Turso — solo per "recenti" (summoner index minimale) ─────────────────────
+// Non salviamo matches né ranked_entries: solo l'essenziale per l'autocomplete.
+const TURSO_URL:   &str = env!("TURSO_URL");
+const TURSO_TOKEN: &str = env!("TURSO_TOKEN");
 
-// OnceCell stores Option<Pool> so we never retry a failed init
-static POOL: OnceCell<Option<Pool>> = OnceCell::const_new();
+/// Esegue una SELECT su Turso e restituisce le righe come Vec<Vec<Value>>.
+async fn turso_query(sql: &str, args: Vec<Value>) -> Result<Vec<Vec<Value>>, String> {
+    let url = TURSO_URL.replace("libsql://", "https://") + "/v2/pipeline";
+    let body = json!({
+        "requests": [{
+            "type": "execute",
+            "stmt": {
+                "sql": sql,
+                "args": args.iter().map(|a| match a {
+                    Value::Number(n) => json!({"type":"integer","value": n.to_string()}),
+                    Value::String(s) => json!({"type":"text","value": s}),
+                    _ => json!({"type":"null","value": null}),
+                }).collect::<Vec<_>>()
+            }
+        }, {"type":"close"}]
+    });
+    let resp = Client::new()
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", TURSO_TOKEN))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send().await.map_err(|e| format!("Turso HTTP: {}", e))?;
+    let data: Value = resp.json().await.map_err(|e| format!("Turso JSON: {}", e))?;
+    let rows_raw = data.pointer("/results/0/response/result/rows")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| {
+            let msg = data.pointer("/results/0/response/error/message")
+                .and_then(|v| v.as_str()).unwrap_or("risposta vuota");
+            format!("Turso query fallita: {}", msg)
+        })?;
+    let rows = rows_raw.iter().map(|row| {
+        row.as_array().unwrap_or(&vec![]).iter().map(|cell| {
+            match cell["type"].as_str() {
+                Some("integer") => cell["value"].as_str()
+                    .and_then(|s| s.parse::<i64>().ok()).map(|n| json!(n)).unwrap_or(Value::Null),
+                Some("real")    => cell["value"].as_str()
+                    .and_then(|s| s.parse::<f64>().ok()).map(|n| json!(n)).unwrap_or(Value::Null),
+                Some("text")    => cell["value"].clone(),
+                _               => Value::Null,
+            }
+        }).collect()
+    }).collect();
+    Ok(rows)
+}
 
-/// Match ID già identificati come pre-Season 2026: saltati senza chiamare Riot API né Neon.
+/// Esegue un DML (INSERT/UPDATE) su Turso — fire-and-forget.
+async fn turso_execute(sql: &str, args: Vec<Value>) {
+    let url = TURSO_URL.replace("libsql://", "https://") + "/v2/pipeline";
+    let body = json!({
+        "requests": [{
+            "type": "execute",
+            "stmt": {
+                "sql": sql,
+                "args": args.iter().map(|a| match a {
+                    Value::Number(n) => json!({"type":"integer","value": n.to_string()}),
+                    Value::String(s) => json!({"type":"text","value": s}),
+                    _ => json!({"type":"null","value": null}),
+                }).collect::<Vec<_>>()
+            }
+        }, {"type":"close"}]
+    });
+    if let Err(e) = Client::new()
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", TURSO_TOKEN))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send().await
+    {
+        eprintln!("❌ turso_execute: {}", e);
+    }
+}
+
+/// Salva solo i metadati essenziali per l'autocomplete dei recenti.
+/// Non scrive matches né ranked_entries — fire-and-forget (spawn).
+fn db_index_summoner(
+    puuid:         String,
+    game_name:     String,
+    tag_line:      String,
+    icon_id:       u64,
+    level:         u64,
+    solo_tier:     String,
+    solo_rank:     String,
+    solo_lp:       i64,
+) {
+    tokio::spawn(async move {
+        turso_execute(
+            "INSERT INTO summoner_cache
+               (puuid, game_name, tag_line, profile, ranked_entries, matches,
+                solo_tier, solo_rank, solo_lp, cached_at)
+             VALUES (?1,?2,?3,?4,'[]','[]',?5,?6,?7,datetime('now'))
+             ON CONFLICT(puuid) DO UPDATE SET
+               game_name  = excluded.game_name,
+               tag_line   = excluded.tag_line,
+               profile    = excluded.profile,
+               solo_tier  = excluded.solo_tier,
+               solo_rank  = excluded.solo_rank,
+               solo_lp    = excluded.solo_lp,
+               cached_at  = datetime('now')",
+            vec![
+                json!(puuid),
+                json!(game_name),
+                json!(tag_line),
+                json!(format!(r#"{{"profileIconId":{},"summonerLevel":{}}}"#, icon_id, level)),
+                json!(solo_tier),
+                json!(solo_rank),
+                json!(solo_lp),
+            ],
+        ).await;
+    });
+}
+
+// ── In-memory caches ─────────────────────────────────────────────────────────
+
+/// Match detail cache — session-scoped, no TTL (match data non cambia mai).
+static MATCH_CACHE: OnceCell<RwLock<HashMap<String, Value>>> = OnceCell::const_new();
+async fn match_cache() -> &'static RwLock<HashMap<String, Value>> {
+    MATCH_CACHE.get_or_init(|| async { RwLock::new(HashMap::new()) }).await
+}
+
+/// Match ID già identificati come pre-Season 2026: saltati senza chiamare Riot API.
 static PRE2026_SKIP: OnceCell<RwLock<HashSet<String>>> = OnceCell::const_new();
-
 async fn pre2026_skip() -> &'static RwLock<HashSet<String>> {
     PRE2026_SKIP.get_or_init(|| async { RwLock::new(HashSet::new()) }).await
 }
 
-async fn get_pool() -> Option<&'static Pool> {
-    POOL.get_or_init(|| async {
-        let mut cfg = Config::new();
-        cfg.host     = Some(env!("NEON_HOST").to_string());
-        cfg.port     = Some(env!("NEON_PORT", "5432").parse::<u16>().unwrap_or(5432));
-        cfg.dbname   = Some(env!("NEON_DB").to_string());
-        cfg.user     = Some(env!("NEON_USER").to_string());
-        cfg.password = Some(env!("NEON_PASSWORD").to_string());
-        cfg.manager  = Some(ManagerConfig { recycling_method: RecyclingMethod::Fast });
-
-        let connector = match TlsConnector::builder()
-            .danger_accept_invalid_certs(true)
-            .build()
-        {
-            Ok(c)  => c,
-            Err(e) => { eprintln!("❌ TLS error: {}", e); return None; }
-        };
-        let tls = MakeTlsConnector::new(connector);
-
-        let pool: Pool = match cfg.create_pool(Some(Runtime::Tokio1), tls) {
-            Ok(p)  => p,
-            Err(e) => { eprintln!("❌ Pool create error: {}", e); return None; }
-        };
-
-        let client = match pool.get().await {
-            Ok(c)  => c,
-            Err(e) => { eprintln!("❌ Pool get error: {}", e); return None; }
-        };
-        if let Err(e) = client.batch_execute("
-            CREATE TABLE IF NOT EXISTS match_cache (
-                match_id   TEXT PRIMARY KEY,
-                data       JSONB NOT NULL,
-                cached_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            );
-            CREATE TABLE IF NOT EXISTS summoner_cache (
-                puuid          TEXT PRIMARY KEY,
-                game_name      TEXT NOT NULL,
-                tag_line       TEXT NOT NULL,
-                profile        JSONB NOT NULL,
-                ranked_entries JSONB NOT NULL,
-                matches        JSONB NOT NULL,
-                cached_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            );
-        ").await {
-            eprintln!("❌ Tabelle error: {}", e);
-            return None;
-        }
-
-        println!("✓ Neon pool pronto.");
-        Some(pool)
-    }).await.as_ref()
+/// Tier list cache (OP.GG MCP) — TTL 15 minuti.
+static TIER_LIST_CACHE: OnceCell<RwLock<Option<(std::time::Instant, String)>>> = OnceCell::const_new();
+async fn tier_list_cache() -> &'static RwLock<Option<(std::time::Instant, String)>> {
+    TIER_LIST_CACHE.get_or_init(|| async { RwLock::new(None) }).await
 }
 
-// ── Season filter ────────────────────────────────────────────────────────────
+/// Masteries cache — TTL 10 minuti.
+static MASTERIES_CACHE: OnceCell<RwLock<HashMap<String, (std::time::Instant, Value)>>> = OnceCell::const_new();
+async fn masteries_cache() -> &'static RwLock<HashMap<String, (std::time::Instant, Value)>> {
+    MASTERIES_CACHE.get_or_init(|| async { RwLock::new(HashMap::new()) }).await
+}
 
-/// Filtra un array JSON di match tenendo solo quelli Season 2026+ e non-custom.
-/// gameCreation è in millisecondi (Riot API), SEASON_2026_START_SECS è in secondi.
+/// Summoner search cache — TTL 10 minuti.
+static SUMMONER_CACHE: OnceCell<RwLock<HashMap<String, (std::time::Instant, Value)>>> = OnceCell::const_new();
+async fn summoner_cache() -> &'static RwLock<HashMap<String, (std::time::Instant, Value)>> {
+    SUMMONER_CACHE.get_or_init(|| async { RwLock::new(HashMap::new()) }).await
+}
+
+/// Live game cache — TTL 25s (il frontend polla ogni 30s).
+/// Key: puuid del giocatore osservato (vuota = proprio profilo).
+static LIVE_GAME_CACHE: OnceCell<RwLock<HashMap<String, (std::time::Instant, Value)>>> = OnceCell::const_new();
+async fn live_game_cache() -> &'static RwLock<HashMap<String, (std::time::Instant, Value)>> {
+    LIVE_GAME_CACHE.get_or_init(|| async { RwLock::new(HashMap::new()) }).await
+}
+
+/// Ranked entry cache per il live game — TTL 5 minuti per puuid.
+static RANKED_CACHE: OnceCell<RwLock<HashMap<String, (std::time::Instant, (String, String, i64))>>> = OnceCell::const_new();
+async fn ranked_cache() -> &'static RwLock<HashMap<String, (std::time::Instant, (String, String, i64))>> {
+    RANKED_CACHE.get_or_init(|| async { RwLock::new(HashMap::new()) }).await
+}
+
+// ── Season filter ─────────────────────────────────────────────────────────────
+
+const SEASON_2026_START_MS:   u64 = 1_736_294_400_000; // 2026-01-08 00:00:00 UTC in ms
+const SEASON_2026_START_SECS: u64 = 1_736_294_400;     // same in seconds
+
 fn filter_season_matches(matches: Value) -> Value {
-    const SEASON_2026_START_MS: u64 = 1_767_830_400 * 1000;
     match matches.as_array() {
         None => matches,
         Some(arr) => {
             let filtered: Vec<Value> = arr.iter().filter(|m| {
-                // Filtro data: solo Season 2026+
                 let gc = m["info"]["gameCreation"].as_u64()
                     .or_else(|| m["gameCreation"].as_u64())
                     .unwrap_or(u64::MAX);
                 if gc < SEASON_2026_START_MS { return false; }
-
-                // Filtro tipo: escludi custom (queueId == 0)
                 let queue_id = m["info"]["queueId"].as_u64()
                     .or_else(|| m["queueId"].as_u64())
-                    .unwrap_or(1); // se mancante, teniamo il match
-                if queue_id == 0 { return false; }
-
-                true
+                    .unwrap_or(1);
+                queue_id != 0
             }).cloned().collect();
             json!(filtered)
         }
     }
 }
 
-// ── DB helpers ───────────────────────────────────────────────────────────────
-
-async fn db_get_match(match_id: &str) -> Option<Value> {
-    let pool: &Pool = get_pool().await?;
-    let pg = pool.get().await
-        .map_err(|e| eprintln!("❌ db_get_match pool: {}", e)).ok()?;
-    let row = pg
-        .query_opt("SELECT data::text FROM match_cache WHERE match_id = $1", &[&match_id])
-        .await.ok()??;
-    let raw: String = row.get(0);
-    serde_json::from_str(&raw).ok()
-}
-
-async fn db_save_match(match_id: &str, data: &Value) {
-    let pool: &Pool = match get_pool().await { Some(p) => p, None => return };
-    let pg = match pool.get().await {
-        Ok(c)  => c,
-        Err(e) => { eprintln!("❌ db_save_match pool: {}", e); return; }
-    };
-    let _ = pg.execute(
-        "INSERT INTO match_cache (match_id, data) VALUES ($1, $2)",
-        &[&match_id, data],
-    ).await;
-}
-
-async fn db_delete_match(match_id: &str) {
-    let pool: &Pool = match get_pool().await { Some(p) => p, None => return };
-    let pg = match pool.get().await {
-        Ok(c)  => c,
-        Err(e) => { eprintln!("❌ db_delete_match pool: {}", e); return; }
-    };
-    match pg.execute("DELETE FROM match_cache WHERE match_id = $1", &[&match_id]).await {
-        Ok(n)  => if n > 0 { println!("🗑 Rimosso da Neon match pre-2026: {}", match_id); },
-        Err(e) => eprintln!("❌ db_delete_match {}: {}", match_id, e),
-    }
-}
-
-async fn db_get_summoner(puuid: &str) -> Option<Value> {
-    let pool: &Pool = get_pool().await?;
-    let pg = pool.get().await
-        .map_err(|e| eprintln!("❌ db_get_summoner pool: {}", e)).ok()?;
-    let row = pg.query_opt(
-        "SELECT profile::text, ranked_entries::text, matches::text, cached_at
-         FROM summoner_cache WHERE puuid = $1",
-        &[&puuid],
-    ).await.ok()??;
-
-    let cached_at: chrono::DateTime<chrono::Utc> = row.get(3);
-    let age: chrono::TimeDelta = chrono::Utc::now() - cached_at;
-    let mins = age.num_minutes();
-    if mins > 60 {
-        println!("Cache summoner {} scaduta ({} min), rifresco.", puuid, mins);
-        return None;
-    }
-
-    let profile: Value        = serde_json::from_str(&row.get::<_, String>(0)).ok()?;
-    let ranked_entries: Value = serde_json::from_str(&row.get::<_, String>(1)).ok()?;
-    let matches: Value        = serde_json::from_str(&row.get::<_, String>(2)).ok()?;
-
-    // Filtra solo partite Season 2026 (gameCreation >= 1767830400000 ms)
-    let matches = filter_season_matches(matches);
-
-    // Se dopo il filtro non restano partite, la cache è obsoleta → forza refetch
-    if matches.as_array().map(|a| a.is_empty()).unwrap_or(true) {
-        println!("Cache summoner {} contiene solo partite pre-Season 2026, invalido.", puuid);
-        return None;
-    }
-
-    Some(json!({
-        "puuid": puuid,
-        "profile": profile,
-        "ranked_entries": ranked_entries,
-        "matches": matches,
-        "_from_cache": true
-    }))
-}
-
-/// Come db_get_summoner ma ignora la scadenza — usato in modalità offline.
-async fn db_get_summoner_offline(puuid: &str) -> Option<Value> {
-    let pool: &Pool = get_pool().await?;
-    let pg = pool.get().await
-        .map_err(|e| eprintln!("❌ db_get_summoner_offline pool: {}", e)).ok()?;
-    let row = pg.query_opt(
-        "SELECT profile::text, ranked_entries::text, matches::text, cached_at
-         FROM summoner_cache WHERE puuid = $1",
-        &[&puuid],
-    ).await.ok()??;
-
-    let cached_at: chrono::DateTime<chrono::Utc> = row.get(3);
-    let age_mins = (chrono::Utc::now() - cached_at).num_minutes();
-    println!("[Offline] Uso cache Neon per {} ({} min fa)", puuid, age_mins);
-
-    let profile: Value        = serde_json::from_str(&row.get::<_, String>(0)).ok()?;
-    let ranked_entries: Value = serde_json::from_str(&row.get::<_, String>(1)).ok()?;
-    let matches: Value        = serde_json::from_str(&row.get::<_, String>(2)).ok()?;
-
-    // Filtra solo partite Season 2026
-    let matches = filter_season_matches(matches);
-
-    // Offline: mantieni anche cache vuota (meglio che niente), ma logga
-    if matches.as_array().map(|a| a.is_empty()).unwrap_or(true) {
-        println!("[Offline] Cache {} contiene solo partite pre-Season 2026.", puuid);
-    }
-
-    Some(json!({
-        "puuid": puuid,
-        "profile": profile,
-        "ranked_entries": ranked_entries,
-        "matches": matches,
-        "_from_cache": true,
-        "_offline": true,
-        "_cache_age_minutes": age_mins
-    }))
-}
-
-async fn db_save_summoner(puuid: &str, profile: &Value, ranked_entries: &Value, matches: &Value) {
-    let pool: &Pool = match get_pool().await { Some(p) => p, None => return };
-    let pg = match pool.get().await {
-        Ok(c)  => c,
-        Err(e) => { eprintln!("❌ db_save_summoner pool: {}", e); return; }
-    };
-    let gn = profile["gameName"].as_str().unwrap_or("").to_string();
-    let tl = profile["tagLine"].as_str().unwrap_or("").to_string();
-    match pg.execute(
-        "INSERT INTO summoner_cache (puuid, game_name, tag_line, profile, ranked_entries, matches, cached_at)
-         VALUES ($1, $2, $3, $4, $5, $6, NOW())
-         ON CONFLICT (puuid) DO UPDATE SET
-           profile        = EXCLUDED.profile,
-           ranked_entries = EXCLUDED.ranked_entries,
-           matches        = EXCLUDED.matches,
-           cached_at      = NOW()",
-        &[&puuid, &gn.as_str(), &tl.as_str(), profile, ranked_entries, matches],
-    ).await {
-        Ok(_)  => println!("✓ Summoner {} salvato in Neon.", puuid),
-        Err(e) => eprintln!("❌ Salvataggio summoner {}: {}", puuid, e),
-    }
-}
-
-/// Indicizza i partecipanti di un live game nella summoner_cache.
-/// Usa INSERT ... ON CONFLICT DO NOTHING per non sovrascrivere dati ricchi già presenti.
-/// Salva solo gameName + tagLine + profileIconId (dati minimi disponibili dallo Spectator/LCD).
-/// Questo arricchisce il live search anche per giocatori mai cercati esplicitamente.
-async fn db_index_live_players(players: &[Value]) {
-    let pool: &Pool = match get_pool().await { Some(p) => p, None => return };
-    let pg = match pool.get().await {
-        Ok(c)  => c,
-        Err(e) => { eprintln!("❌ db_index_live_players pool: {}", e); return; }
-    };
-
-    let mut indexed = 0usize;
-    for player in players {
-        // Ricava puuid — se manca non possiamo indicizzare
-        let puuid = player["puuid"].as_str().unwrap_or("");
-        if puuid.is_empty() { continue; }
-
-        // Ricava game_name e tag_line dal campo summoner_name ("Nome#TAG") oppure da campi separati
-        let summoner_name = player["summoner_name"].as_str().unwrap_or("");
-        let (game_name, tag_line) = if summoner_name.contains('#') {
-            let mut parts = summoner_name.splitn(2, '#');
-            (
-                parts.next().unwrap_or("").to_string(),
-                parts.next().unwrap_or("").to_string(),
-            )
-        } else {
-            // Niente tag → non abbastanza dati per una ricerca utile
-            continue;
-        };
-
-        if game_name.is_empty() || tag_line.is_empty() { continue; }
-
-        let profile_icon = player["profile_icon_id"].as_u64().unwrap_or(0);
-        let profile = json!({
-            "gameName":      game_name,
-            "tagLine":       tag_line,
-            "profileIconId": profile_icon,
-            "summonerLevel": player["summoner_level"],
-        });
-        let empty_arr = json!([]);
-        let empty_matches = json!([]);
-
-        // ON CONFLICT DO NOTHING: se il summoner ha già dati ricchi (match, rank) non li tocchiamo
-        match pg.execute(
-            "INSERT INTO summoner_cache
-               (puuid, game_name, tag_line, profile, ranked_entries, matches, cached_at)
-             VALUES ($1, $2, $3, $4, $5, $6, NOW())
-             ON CONFLICT (puuid) DO NOTHING",
-            &[&puuid, &game_name.as_str(), &tag_line.as_str(), &profile, &empty_arr, &empty_matches],
-        ).await {
-            Ok(n)  => if n > 0 { indexed += 1; },
-            Err(e) => eprintln!("❌ db_index_live_players {}: {}", puuid, e),
-        }
-    }
-
-    if indexed > 0 {
-        println!("[LiveIndex] Indicizzati {} nuovi summoner dal live game.", indexed);
-    }
-}
-
-/// Recupera profilo, ranked e match via Riot API pubblica (senza LCU).
-/// Usata quando il client è chiuso per avere dati freschi.
-async fn fetch_profile_from_riot_api(
-    game_name: &str,
-    tag_line: &str,
-    client: &Client,
-) -> Option<Value> {
-    println!("[RLP] Client chiuso → fetch Riot API per {}", game_name);
-
-    let puuid = fetch_puuid(game_name, tag_line, client).await?;
-
-    // Ranked entries
-    let ranked_text = client
-        .get(&format!(
-            "https://euw1.api.riotgames.com/lol/league/v4/entries/by-puuid/{}",
-            puuid
-        ))
-        .header("X-Riot-Token", riot_api_key())
-        .send().await.ok()?
-        .text().await.unwrap_or_default();
-    let ranked_entries: Value = serde_json::from_str(&ranked_text).unwrap_or(json!([]));
-
-    // Summoner (level + icon)
-    let summoner: Value = client
-        .get(&format!(
-            "https://euw1.api.riotgames.com/lol/summoner/v4/summoners/by-puuid/{}",
-            puuid
-        ))
-        .header("X-Riot-Token", riot_api_key())
-        .send().await.ok()?
-        .json().await.unwrap_or(json!({}));
-
-    // Ultimi 10 match
-    let match_ids = fetch_match_ids(&puuid, 0, 10, client).await;
-    let mut match_details: Vec<Value> = vec![];
-    for id in match_ids.iter() {
-        match_details.push(fetch_match_detail(id, client).await);
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-
-    // Normalizza ranked_entries (rank → division per compatibilità mapRanked)
-    let normalized_entries: Vec<Value> = ranked_entries
-        .as_array().unwrap_or(&vec![])
-        .iter().map(|e| {
-            let mut entry = e.clone();
-            if entry["division"].is_null() || entry["division"].as_str().unwrap_or("") == "" {
-                if let Some(div) = e["rank"].as_str() {
-                    entry["division"] = json!(div);
-                }
-            }
-            entry
-        }).collect();
-
-    let queues = normalized_entries.clone();
-
-    let profile = json!({
-        "gameName": game_name,
-        "tagLine": tag_line,
-        "summonerLevel": summoner["summonerLevel"],
-        "profileIconId": summoner["profileIconId"],
-        "xpSinceLastLevel": 0,
-        "xpUntilNextLevel": 1,
-    });
-
-    let matches_json  = json!(match_details);
-    let ranked_json   = json!(normalized_entries);
-
-    // Salva in Neon e cache locale per usi futuri
-    db_save_summoner(&puuid, &profile, &ranked_json, &matches_json).await;
-
-    println!("[RLP] Riot API fetch completato per {} ({} match)", game_name, match_details.len());
-
-    Some(json!({
-        "puuid": puuid,
-        "profile": profile,
-        "ranked": { "queues": queues },
-        "ranked_entries": ranked_json,
-        "matches": matches_json,
-        "last_update": chrono::Utc::now().to_rfc3339()
-    }))
-}
-
-/// Tenta di recuperare i dati quando il client è chiuso:
-/// 1. Riot API pubblica (dati freschi, sempre)
-/// 2. Neon cache (ignorando scadenza, se Riot API non è raggiungibile)
-/// 3. Cache locale JSON (ultimo fallback)
-async fn offline_fallback(cached_data: &Option<Value>) -> Result<Value, String> {
-    // Recupera game_name e tag_line dalla cache locale per poter chiamare Riot API
-    if let Some(cache) = cached_data {
-        let game_name = cache["profile"]["gameName"].as_str()
-            .or_else(|| cache["profile"]["game_name"].as_str())
-            .unwrap_or("");
-        let tag_line = cache["profile"]["tagLine"].as_str()
-            .or_else(|| cache["profile"]["tag_line"].as_str())
-            .unwrap_or("");
-
-        if !game_name.is_empty() && !tag_line.is_empty() {
-            let client = Client::builder()
-                .danger_accept_invalid_certs(true)
-                .timeout(std::time::Duration::from_secs(15))
-                .build()
-                .unwrap();
-
-            if let Some(fresh) = fetch_profile_from_riot_api(game_name, tag_line, &client).await {
-                println!("[RLP] Dati freschi da Riot API (client chiuso).");
-                return Ok(fresh);
-            }
-            println!("[RLP] Riot API non raggiungibile, provo Neon...");
-        }
-
-        // Fallback Neon
-        if let Some(puuid) = cache["puuid"].as_str() {
-            if !puuid.is_empty() {
-                if let Some(neon_data) = db_get_summoner_offline(puuid).await {
-                    println!("[RLP] Dati da Neon cache per puuid={}", puuid);
-                    let profile = neon_data["profile"].clone();
-                    let matches = neon_data["matches"].clone();
-                    let queues: Vec<Value> = neon_data["ranked_entries"]
-                        .as_array().cloned().unwrap_or_default()
-                        .into_iter().map(|mut e| {
-                            if e["division"].is_null() {
-                                let rank_val = e["rank"].clone();
-                                e["division"] = rank_val;
-                            }
-                            e
-                        }).collect();
-                    return Ok(json!({
-                        "puuid": puuid,
-                        "profile": profile,
-                        "ranked": { "queues": queues },
-                        "matches": matches,
-                        "_offline": true,
-                        "_cache_age_minutes": neon_data["_cache_age_minutes"]
-                    }));
-                }
-            }
-        }
-    }
-
-    // Fallback finale: cache locale
-    match cached_data {
-        Some(cache) => {
-            println!("[RLP] Uso cache locale (file) come ultimo fallback.");
-            Ok(cache.clone())
-        }
-        None => Err("CLIENT_CLOSED".into()),
-    }
-}
+// ── LCU helpers ───────────────────────────────────────────────────────────────
 
 /// Cerca il lockfile di League su tutte le lettere di drive possibili (C→Z).
 fn get_lockfile_path() -> Option<PathBuf> {
@@ -484,12 +226,12 @@ fn get_lockfile_path() -> Option<PathBuf> {
         for suffix in &suffixes {
             let path = PathBuf::from(format!(r"{}:\{}", drive, suffix));
             if path.exists() {
-                eprintln!("[RLP] lockfile trovato: {:?}", path);
+                eprintln!("[LCU] lockfile trovato: {:?}", path);
                 return Some(path);
             }
         }
     }
-    eprintln!("[RLP] lockfile non trovato su nessun drive (C:-Z:)");
+    eprintln!("[LCU] lockfile non trovato su nessun drive (C:-Z:)");
     None
 }
 
@@ -499,16 +241,15 @@ fn get_cache_path(handle: &AppHandle) -> PathBuf {
         .join("cache.json")
 }
 
+// ── Riot API helpers ──────────────────────────────────────────────────────────
+
 /// Percent-encodes un path segment RFC-3986.
-/// Itera sui BYTE UTF-8 (non codepoint Unicode) per encoding corretto
-/// anche con caratteri non-ASCII (coreano, cinese, emoji...).
-/// Es: '망' (U+B9DD) → bytes [0xEB, 0xA7, 0x9D] → "%EB%A7%9D"
 fn encode_path(s: &str) -> String {
     s.bytes().map(|b| match b {
         b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9'
         | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
-        b' ' => "%20".to_string(),
-        b    => format!("%{:02X}", b),
+        b' '  => "%20".to_string(),
+        b     => format!("%{:02X}", b),
     }).collect::<Vec<_>>().join("")
 }
 
@@ -517,27 +258,14 @@ async fn fetch_puuid(game_name: &str, tag_line: &str, client: &Client) -> Option
         "https://europe.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{}/{}",
         encode_path(game_name), encode_path(tag_line)
     );
-    println!("[fetch_puuid] GET {}", url);
     let res = match client.get(&url).header("X-Riot-Token", riot_api_key()).send().await {
         Ok(r)  => r,
-        Err(e) => { eprintln!("❌ fetch_puuid network error: {}", e); return None; }
+        Err(e) => { eprintln!("❌ fetch_puuid: {}", e); return None; }
     };
-    let status = res.status().as_u16();
-    let body   = res.text().await.unwrap_or_default();
-    if status != 200 {
-        eprintln!("❌ fetch_puuid HTTP {} per '{}#{}': {}", status, game_name, tag_line,
-            &body[..body.len().min(300)]);
-        return None;
-    }
-    let data: Value = serde_json::from_str(&body).ok()?;
+    if res.status().as_u16() != 200 { return None; }
+    let data: Value = res.json().await.ok()?;
     data["puuid"].as_str().map(|s| s.to_string())
 }
-
-async fn fetch_match_ids(puuid: &str, start: u32, count: u32, client: &Client) -> Vec<String> {
-    fetch_match_ids_since(puuid, start, count, None, client).await
-}
-
-const SEASON_2026_START_SECS: u64 = 1_767_830_400; // 2026-01-08 00:00:00 UTC
 
 async fn fetch_match_ids_since(puuid: &str, start: u32, count: u32, start_time: Option<u64>, client: &Client) -> Vec<String> {
     let mut url = format!(
@@ -551,9 +279,7 @@ async fn fetch_match_ids_since(puuid: &str, start: u32, count: u32, start_time: 
         match client.get(&url).header("X-Riot-Token", riot_api_key()).send().await {
             Ok(res) => {
                 if res.status().as_u16() == 429 {
-                    let wait = 2000 * (attempt + 1) as u64;
-                    println!("Rate limit fetch_match_ids, attendo {}ms...", wait);
-                    tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(2000 * (attempt + 1) as u64)).await;
                     continue;
                 }
                 return res.json::<Vec<String>>().await.unwrap_or_default();
@@ -565,51 +291,43 @@ async fn fetch_match_ids_since(puuid: &str, start: u32, count: u32, start_time: 
 }
 
 async fn fetch_match_detail(match_id: &str, client: &Client) -> Value {
-    const SEASON_2026_START_MS: u64 = 1_767_830_400 * 1000; // 2026-01-08 00:00:00 UTC
-
-    // Controllo fast-path: già identificato come pre-2026 in questa sessione
+    // Fast-path: già identificato come pre-2026 in questa sessione
     {
         let skip = pre2026_skip().await.read().await;
-        if skip.contains(match_id) {
-            return json!({});
+        if skip.contains(match_id) { return json!({}); }
+    }
+
+    // In-memory cache (session)
+    {
+        let cache = match_cache().await.read().await;
+        if let Some(cached) = cache.get(match_id) {
+            let gc = cached["info"]["gameCreation"].as_u64().unwrap_or(u64::MAX);
+            if gc < SEASON_2026_START_MS {
+                drop(cache);
+                pre2026_skip().await.write().await.insert(match_id.to_string());
+                return json!({});
+            }
+            eprintln!("✓ match cache hit: {}", match_id);
+            return cached.clone();
         }
     }
 
-    if let Some(cached) = db_get_match(match_id).await {
-        let gc = cached["info"]["gameCreation"].as_u64()
-            .or_else(|| cached["gameCreation"].as_u64())
-            .unwrap_or(u64::MAX);
-        if gc < SEASON_2026_START_MS {
-            println!("🗑 Neon match pre-2026 (gc={}), cancello: {}", gc, match_id);
-            db_delete_match(match_id).await;
-            // Aggiunge al set in-memory per evitare doppie chiamate
-            pre2026_skip().await.write().await.insert(match_id.to_string());
-            return json!({});
-        }
-        println!("✓ Cache hit Neon: {}", match_id);
-        return cached;
-    }
-
-    // Non in Neon: fetcha da Riot API. Se la data risulta pre-2026, non salvare.
     let url = format!("https://europe.api.riotgames.com/lol/match/v5/matches/{}", match_id);
     for attempt in 0..3u32 {
         match client.get(&url).header("X-Riot-Token", riot_api_key()).send().await {
             Ok(res) => {
                 if res.status().as_u16() == 429 {
-                    let wait = 2000 * (attempt + 1) as u64;
-                    println!("Rate limit fetch_match_detail {}, attendo {}ms...", match_id, wait);
-                    tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(2000 * (attempt + 1) as u64)).await;
                     continue;
                 }
                 let data = res.json::<Value>().await.unwrap_or(json!({}));
                 if data.get("metadata").is_some() {
                     let gc = data["info"]["gameCreation"].as_u64().unwrap_or(u64::MAX);
                     if gc < SEASON_2026_START_MS {
-                        println!("🗑 Riot API match pre-2026 (gc={}), scarto: {}", gc, match_id);
                         pre2026_skip().await.write().await.insert(match_id.to_string());
                         return json!({});
                     }
-                    db_save_match(match_id, &data).await;
+                    match_cache().await.write().await.insert(match_id.to_string(), data.clone());
                 }
                 return data;
             }
@@ -619,75 +337,476 @@ async fn fetch_match_detail(match_id: &str, client: &Client) -> Value {
     json!({})
 }
 
-async fn call_opgg_tool(tool_name: &str, arguments: Value, client: &Client) -> Result<Value, String> {
-    let body = json!({
-        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-        "params": { "name": tool_name, "arguments": arguments }
-    });
-    let res  = client.post(OPGG_MCP_URL)
-        .header("Content-Type", "application/json")
-        .header("Accept", "application/json, text/event-stream")
-        .json(&body).send().await.map_err(|e| e.to_string())?;
-    let text = res.text().await.map_err(|e| e.to_string())?;
-    for line in text.lines() {
-        if let Some(data) = line.strip_prefix("data: ") {
-            if let Ok(parsed) = serde_json::from_str::<Value>(data) {
-                if let Some(content) = parsed["result"]["content"].as_array() {
-                    for item in content {
-                        if item["type"] == "text" {
-                            if let Some(text_val) = item["text"].as_str() {
-                                if let Ok(inner) = serde_json::from_str::<Value>(text_val) {
-                                    return Ok(inner);
-                                }
-                            }
-                        }
-                    }
-                }
-                return Ok(parsed);
+/// Recupera ranked SoloQ (fallback Flex) per un puuid via League-V4.
+/// Cache in-memory TTL 5 minuti — evita chiamate ripetute per lo stesso player.
+async fn fetch_ranked_entry(puuid: String, client: Client) -> (String, String, i64) {
+    if puuid.is_empty() { return (String::new(), String::new(), 0); }
+    // Cache check
+    {
+        let cache = ranked_cache().await.read().await;
+        if let Some((ts, entry)) = cache.get(&puuid) {
+            if ts.elapsed() < std::time::Duration::from_secs(300) {
+                return entry.clone();
             }
         }
     }
-    Err(format!("Risposta OP.GGG non valida (primi 800 car): {}", &text[..800.min(text.len())]))
+    let url = format!("https://euw1.api.riotgames.com/lol/league/v4/entries/by-puuid/{}", puuid);
+    let entries: Vec<Value> = match client.get(&url)
+        .header("X-Riot-Token", riot_api_key())
+        .timeout(std::time::Duration::from_secs(10))
+        .send().await
+    {
+        Ok(r) if r.status().as_u16() == 200 => r.json().await.unwrap_or_default(),
+        _ => return (String::new(), String::new(), 0), // non cachare fallimenti
+    };
+    let result = {
+        let mut found = (String::new(), String::new(), 0i64);
+        'outer: for queue in &["RANKED_SOLO_5x5", "RANKED_FLEX_SR"] {
+            if let Some(e) = entries.iter().find(|e| e["queueType"].as_str() == Some(queue)) {
+                let tier = e["tier"].as_str().unwrap_or("").to_uppercase();
+                let rank = e["rank"].as_str().unwrap_or("").to_uppercase();
+                let lp   = e["leaguePoints"].as_i64().unwrap_or(0);
+                if !tier.is_empty() && tier != "NONE" {
+                    found = (tier, rank, lp);
+                    break 'outer;
+                }
+            }
+        }
+        found
+    };
+    // Salva in cache SOLO se abbiamo un tier reale (non Unranked genuino vs errore)
+    // Per gli Unranked genuini (entries vuoto ma 200 OK) salviamo comunque con TTL breve
+    if !result.0.is_empty() {
+        ranked_cache().await.write().await
+            .insert(puuid, (std::time::Instant::now(), result.clone()));
+    }
+    result
 }
 
-// ── Tauri commands ───────────────────────────────────────────────────────────
+/// Recupera dati smart per i badge live: summoner_level + mastery top-1.
+/// Solo 2 chiamate parallele per player.
+async fn fetch_smart_data_live(puuid: String, client: Client) -> Option<Value> {
+    if puuid.is_empty() { return None; }
+    let c1 = client.clone();
+    let c2 = client.clone();
+    let p1 = puuid.clone();
+    let p2 = puuid.clone();
 
+    let (summoner_res, masteries_res) = tokio::join!(
+        async move {
+            let url = format!("https://euw1.api.riotgames.com/lol/summoner/v4/summoners/by-puuid/{}", p1);
+            let r = c1.get(&url).header("X-Riot-Token", riot_api_key()).send().await.ok()?;
+            if !r.status().is_success() { return None; }
+            r.json::<Value>().await.ok()
+        },
+        async move {
+            let url = format!(
+                "https://euw1.api.riotgames.com/lol/champion-mastery/v4/champion-masteries/by-puuid/{}/top?count=1",
+                p2
+            );
+            let r = c2.get(&url).header("X-Riot-Token", riot_api_key()).send().await.ok()?;
+            if !r.status().is_success() { return None; }
+            r.json::<Value>().await.ok()
+        }
+    );
+
+    let summoner_level   = summoner_res.as_ref().and_then(|s| s["summonerLevel"].as_u64());
+    let main_champion_id = masteries_res.as_ref()
+        .and_then(|v| v.as_array()).and_then(|a| a.first())
+        .and_then(|m| m["championId"].as_u64());
+
+    Some(json!({
+        "summoner_level":      summoner_level,
+        "main_champion":       null,
+        "main_champion_id":    main_champion_id,
+        "main_role":           null,
+        "total_games":         0,
+        "games_on_main_champ": 0,
+    }))
+}
+
+/// Recupera profilo via Riot API (usato quando LCU non è disponibile).
+async fn fetch_profile_from_riot_api(game_name: &str, tag_line: &str, client: &Client) -> Option<Value> {
+    eprintln!("[RLP] fetch Riot API per {}", game_name);
+    let puuid = fetch_puuid(game_name, tag_line, client).await?;
+
+    let ranked_text = client
+        .get(&format!("https://euw1.api.riotgames.com/lol/league/v4/entries/by-puuid/{}", puuid))
+        .header("X-Riot-Token", riot_api_key())
+        .send().await.ok()?
+        .text().await.unwrap_or_default();
+    let ranked_entries: Value = serde_json::from_str(&ranked_text).unwrap_or(json!([]));
+
+    let summoner: Value = client
+        .get(&format!("https://euw1.api.riotgames.com/lol/summoner/v4/summoners/by-puuid/{}", puuid))
+        .header("X-Riot-Token", riot_api_key())
+        .send().await.ok()?
+        .json().await.unwrap_or(json!({}));
+
+    let match_ids = fetch_match_ids_since(&puuid, 0, 10, Some(SEASON_2026_START_SECS), client).await;
+    let mut match_details: Vec<Value> = vec![];
+    for id in match_ids.iter() {
+        let detail = fetch_match_detail(id, client).await;
+        if detail.get("metadata").is_none() { continue; }
+        let queue_id = detail["info"]["queueId"].as_u64().unwrap_or(1);
+        if queue_id != 0 { match_details.push(detail); }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    let profile = json!({
+        "gameName":       game_name,
+        "tagLine":        tag_line,
+        "summonerLevel":  summoner["summonerLevel"],
+        "profileIconId":  summoner["profileIconId"],
+        "xpSinceLastLevel":  0,
+        "xpUntilNextLevel":  1,
+    });
+
+    let normalized_entries: Vec<Value> = ranked_entries.as_array().unwrap_or(&vec![])
+        .iter().map(|e| {
+            let mut entry = e.clone();
+            if entry["division"].is_null() {
+                let rank_val = e["rank"].clone();
+                entry["division"] = rank_val;
+            }
+            entry
+        }).collect();
+    let ranked_json = json!(normalized_entries);
+    let queues: Vec<Value> = normalized_entries.clone();
+
+    eprintln!("[RLP] Riot API fetch completato per {} ({} match)", game_name, match_details.len());
+
+    Some(json!({
+        "puuid":          puuid,
+        "profile":        profile,
+        "ranked":         { "queues": queues },
+        "ranked_entries": ranked_json,
+        "matches":        match_details,
+        "last_update":    chrono::Utc::now().to_rfc3339()
+    }))
+}
+
+/// Fallback quando LCU non è raggiungibile:
+/// 1. Riot API pubblica (dati freschi)
+/// 2. Cache locale JSON (ultimo fallback)
+async fn offline_fallback(cached_data: &Option<Value>) -> Result<Value, String> {
+    if let Some(cache) = cached_data {
+        let game_name = cache["profile"]["gameName"].as_str()
+            .or_else(|| cache["profile"]["game_name"].as_str())
+            .unwrap_or("");
+        let tag_line = cache["profile"]["tagLine"].as_str()
+            .or_else(|| cache["profile"]["tag_line"].as_str())
+            .unwrap_or("");
+
+        if !game_name.is_empty() && !tag_line.is_empty() {
+            let client = Client::builder()
+                .danger_accept_invalid_certs(true)
+                .timeout(std::time::Duration::from_secs(15))
+                .build().unwrap();
+
+            if let Some(fresh) = fetch_profile_from_riot_api(game_name, tag_line, &client).await {
+                eprintln!("[RLP] Dati freschi da Riot API (client chiuso).");
+                return Ok(fresh);
+            }
+            eprintln!("[RLP] Riot API non raggiungibile, uso cache locale.");
+        }
+    }
+
+    match cached_data {
+        Some(cache) => {
+            eprintln!("[RLP] Uso cache locale come fallback.");
+            Ok(cache.clone())
+        }
+        None => Err("CLIENT_CLOSED".into()),
+    }
+}
+
+// ── Live Game helpers ─────────────────────────────────────────────────────────
+
+fn spell_id_to_ddragon(id: u64) -> &'static str {
+    match id {
+        4  => "SummonerFlash",    14 => "SummonerDot",
+        12 => "SummonerTeleport", 21 => "SummonerBarrier",
+        3  => "SummonerExhaust",  6  => "SummonerHaste",
+        7  => "SummonerHeal",     1  => "SummonerBoost",
+        11 => "SummonerSmite",    13 => "SummonerMana",
+        32 => "SummonerSnowball", _  => "SummonerFlash",
+    }
+}
+
+/// Chiama la Live Client Data API locale (porta 2999).
+/// Disponibile ONLY quando sei personalmente in partita.
+async fn fetch_live_client_data(client: &Client) -> Option<Value> {
+    let res = client
+        .get("https://127.0.0.1:2999/liveclientdata/allgamedata")
+        .send().await.ok()?;
+    if !res.status().is_success() { return None; }
+    let data: Value = res.json().await.ok()?;
+    if data["allPlayers"].as_array().is_none() { return None; }
+    Some(data)
+}
+
+/// Normalizza la risposta LCD nel formato interno.
+fn build_live_game_from_lcd(lcd: &Value, my_summoner_name: &str) -> Value {
+    let game_data  = &lcd["gameData"];
+    let queue_type = match game_data["gameMode"].as_str().unwrap_or("") {
+        "CLASSIC"      => "Normal/Ranked",
+        "ARAM"         => "ARAM",
+        "URF"          => "URF",
+        "ARURF"        => "ARURF",
+        "ONEFORALL"    => "One for All",
+        "NEXUSBLITZ"   => "Nexus Blitz",
+        "ULTBOOK"      => "Ultimate Spellbook",
+        "CHERRY"       => "Arena",
+        "TUTORIAL"     => "Tutorial",
+        "PRACTICETOOL" => "Practice Tool",
+        other          => other,
+    }.to_string();
+
+    let game_length = game_data["gameTime"].as_f64().unwrap_or(0.0) as u64;
+    let empty = vec![];
+    let all_players = lcd["allPlayers"].as_array().unwrap_or(&empty);
+
+    fn map_spell(s: &str) -> &str {
+        match s {
+            "SummonerFlash"    => "SummonerFlash",
+            "SummonerDot"      => "SummonerDot",
+            "SummonerTeleport" => "SummonerTeleport",
+            "SummonerBarrier"  => "SummonerBarrier",
+            "SummonerExhaust"  => "SummonerExhaust",
+            "SummonerHaste"    => "SummonerHaste",
+            "SummonerHeal"     => "SummonerHeal",
+            "SummonerBoost"    => "SummonerBoost",
+            "SummonerSmite"    => "SummonerSmite",
+            "SummonerMana"     => "SummonerMana",
+            "SummonerSnowball" => "SummonerSnowball",
+            other              => other,
+        }
+    }
+
+    let players: Vec<Value> = all_players.iter().map(|p| {
+        let name = p["summonerName"].as_str().unwrap_or("").to_string();
+        let champ = p["championName"].as_str().unwrap_or("").to_string();
+        let team_str = p["team"].as_str().unwrap_or("ORDER");
+        let is_me = name.eq_ignore_ascii_case(my_summoner_name)
+            || name.eq_ignore_ascii_case(my_summoner_name.split('#').next().unwrap_or(""));
+        let spell1 = p["summonerSpells"]["summonerSpellOne"]["displayName"].as_str().unwrap_or("SummonerFlash");
+        let spell2 = p["summonerSpells"]["summonerSpellTwo"]["displayName"].as_str().unwrap_or("SummonerFlash");
+        json!({
+            "summoner_name":     name,
+            "puuid":             "",
+            "champion_id":       0,
+            "champion_name":     champ,
+            "profile_icon_id":   0,
+            "team":              team_str,
+            "spell1":            map_spell(spell1),
+            "spell2":            map_spell(spell2),
+            "tier":              "",
+            "rank":              "",
+            "lp":                0,
+            "is_me":             is_me,
+            "summoner_level":    null,
+            "main_champion":     null,
+            "main_champion_id":  null,
+            "main_role":         null,
+            "total_games":       0,
+            "games_on_champion": 0,
+        })
+    }).collect();
+
+    let bans = lcd["teamData"]["bannedChampions"].as_array()
+        .unwrap_or(&empty).iter()
+        .map(|b| json!({
+            "champion_id": b["championId"].as_i64().unwrap_or(-1),
+            "team":        "ORDER",
+            "pick_turn":   b["pickTurn"].as_u64().unwrap_or(0),
+        })).collect::<Vec<_>>();
+
+    json!({
+        "in_game":          true,
+        "game_time":        game_length,
+        "game_start_time":  0,
+        "queue_type":       queue_type,
+        "game_id":          0,
+        "banned_champions": bans,
+        "players":          players,
+        "duo_pairs":        [],
+        "_source":          "lcd",
+    })
+}
+
+/// Chiama Spectator-V5 per un puuid.
+async fn fetch_spectator(puuid: &str, client: &Client) -> Option<Value> {
+    let url = format!(
+        "https://euw1.api.riotgames.com/lol/spectator/v5/active-games/by-summoner/{}",
+        puuid
+    );
+    let res = match client.get(&url)
+        .header("X-Riot-Token", riot_api_key())
+        .timeout(std::time::Duration::from_secs(8))
+        .send().await
+    {
+        Ok(r)  => r,
+        Err(e) => { eprintln!("[Spectator] Errore: {}", e); return None; }
+    };
+    let code = res.status().as_u16();
+    eprintln!("[Spectator] HTTP {} per puuid={:.20}", code, puuid);
+    if code != 200 { return None; }
+    let data: Value = res.json().await.ok()?;
+    if data.get("status").is_some() { return None; }
+    Some(data)
+}
+
+/// Normalizza la risposta Spectator V5 nel formato interno.
+/// Fetcha ranked + smart data (summoner_level + mastery) in parallelo per ogni player.
+async fn build_live_game_response(raw: &Value, my_puuid: &str, client: &Client) -> Value {
+    let queue_id   = raw["gameQueueConfigId"].as_u64().unwrap_or(0);
+    let queue_type = match queue_id {
+        420  => "Ranked Solo/Duo", 440 => "Ranked Flex",
+        400  => "Normal Draft",    430 => "Normal Blind",
+        450  => "ARAM",
+        900  | 1900 => "URF",
+        1010 | 1012 => "ARURF",
+        1020 => "One for All",
+        1700 | 1710 => "Arena",
+        1400 => "Ultimate Spellbook",
+        700  | 1300 => "Nexus Blitz",
+        600  => "Clash",
+        480  => "Swiftplay",
+        490  => "Normal Quickplay",
+        _    => "Other",
+    }.to_string();
+
+    let game_length     = raw["gameLength"].as_u64().unwrap_or(0);
+    let game_start_time = raw["gameStartTime"].as_i64().unwrap_or(0);
+    let empty_arr = vec![];
+
+    let banned: Vec<Value> = raw["bannedChampions"].as_array().unwrap_or(&empty_arr)
+        .iter().map(|b| json!({
+            "champion_id": b["championId"].as_i64().unwrap_or(-1),
+            "team":        if b["teamId"].as_u64().unwrap_or(100) == 100 { "ORDER" } else { "CHAOS" },
+            "pick_turn":   b["pickTurn"].as_u64().unwrap_or(0),
+        })).collect();
+
+    let participants = raw["participants"].as_array().unwrap_or(&empty_arr);
+    let puuids: Vec<String> = participants.iter()
+        .map(|p| p["puuid"].as_str().unwrap_or("").to_string())
+        .collect();
+
+    // Ranked + smart data: tutti in parallelo (2 API call per player)
+    let rank_handles: Vec<_> = puuids.iter().map(|puuid| {
+        let p = puuid.clone();
+        let c = client.clone();
+        tokio::spawn(async move { fetch_ranked_entry(p, c).await })
+    }).collect();
+
+    let smart_handles: Vec<_> = puuids.iter().map(|puuid| {
+        let p = puuid.clone();
+        let c = client.clone();
+        tokio::spawn(async move {
+            if p.is_empty() { return (p, None); }
+            let sd = fetch_smart_data_live(p.clone(), c).await;
+            (p, sd)
+        })
+    }).collect();
+
+    let mut ranks: Vec<(String, String, i64)> = Vec::new();
+    for h in rank_handles { ranks.push(h.await.unwrap_or_default()); }
+
+    let mut smart_map: HashMap<String, Value> = HashMap::new();
+    for h in smart_handles {
+        if let Ok((puuid, Some(sd))) = h.await { smart_map.insert(puuid, sd); }
+    }
+
+    let players: Vec<Value> = participants.iter()
+        .zip(ranks.iter())
+        .map(|(p, (tier, rank, lp))| {
+            let puuid_p      = p["puuid"].as_str().unwrap_or("");
+            let champ_id     = p["championId"].as_u64().unwrap_or(0);
+            let team_id      = p["teamId"].as_u64().unwrap_or(100);
+            let profile_icon = p["profileIconId"].as_u64().unwrap_or(0);
+            let riot_id      = p["riotId"].as_str().unwrap_or("");
+            let name         = if !riot_id.is_empty() { riot_id.to_string() }
+                               else { p["summonerName"].as_str().unwrap_or("").to_string() };
+            let is_me        = !my_puuid.is_empty() && puuid_p == my_puuid;
+            let smart        = smart_map.get(puuid_p);
+
+            let summoner_level   = smart.and_then(|s| s["summoner_level"].as_u64());
+            let main_champion_id = smart.and_then(|s| s["main_champion_id"].as_u64());
+            let main_champion    = smart.and_then(|s| s["main_champion"].as_str().map(|v| v.to_string()));
+            let main_role        = smart.and_then(|s| s["main_role"].as_str().map(|v| v.to_string()));
+            let total_games      = smart.and_then(|s| s["total_games"].as_u64()).unwrap_or(0);
+            let games_on_champion = smart.and_then(|s| s["games_on_main_champ"].as_u64()).unwrap_or(0);
+
+            json!({
+                "summoner_name":     name,
+                "puuid":             puuid_p,
+                "champion_id":       champ_id,
+                "champion_name":     "",
+                "profile_icon_id":   profile_icon,
+                "team":              if team_id == 100 { "ORDER" } else { "CHAOS" },
+                "spell1":            spell_id_to_ddragon(p["spell1Id"].as_u64().unwrap_or(0)),
+                "spell2":            spell_id_to_ddragon(p["spell2Id"].as_u64().unwrap_or(0)),
+                "tier":              tier,
+                "rank":              rank,
+                "lp":                lp,
+                "is_me":             is_me,
+                "summoner_level":    summoner_level,
+                "main_champion":     main_champion,
+                "main_champion_id":  main_champion_id,
+                "main_role":         main_role,
+                "total_games":       total_games,
+                "games_on_champion": games_on_champion,
+            })
+        })
+        .collect();
+
+    json!({
+        "in_game":          true,
+        "game_time":        game_length,
+        "game_start_time":  game_start_time,
+        "queue_type":       queue_type,
+        "game_id":          raw["gameId"],
+        "banned_champions": banned,
+        "players":          players,
+        "duo_pairs":        [],
+    })
+}
+
+// ── Tauri commands ────────────────────────────────────────────────────────────
+
+/// Carica il profilo del giocatore loggato via LCU + Riot API.
+/// Fallback: Riot API diretta → cache locale.
 #[tauri::command]
 async fn get_profiles(handle: AppHandle) -> Result<Value, String> {
-    let cache_p = get_cache_path(&handle);
-
+    let cache_p    = get_cache_path(&handle);
     let cached_data: Option<Value> = fs::read_to_string(&cache_p).ok()
         .and_then(|s| serde_json::from_str(&s).ok());
 
     let lock_path = match get_lockfile_path() {
         Some(p) => p,
         None    => {
-            eprintln!("[RLP] Client chiuso (no lockfile), provo offline fallback.");
+            eprintln!("[RLP] Client chiuso (no lockfile), offline fallback.");
             return offline_fallback(&cached_data).await;
         }
     };
 
     if !lock_path.exists() {
-        eprintln!("[RLP] Lockfile assente, provo offline fallback.");
         return offline_fallback(&cached_data).await;
     }
 
-    let content  = fs::read_to_string(lock_path).map_err(|_| "Errore lockfile")?;
+    let content  = fs::read_to_string(&lock_path).map_err(|_| "Errore lockfile")?;
     let parts: Vec<&str> = content.split(':').collect();
     let port     = parts[2];
     let password = parts[3];
     let auth     = general_purpose::STANDARD.encode(format!("riot:{}", password));
+    let client   = Client::builder().danger_accept_invalid_certs(true).build().unwrap();
 
-    let client = Client::builder().danger_accept_invalid_certs(true).build().unwrap();
-
-    let lcu_resp = client
+    let lcu_resp = match client
         .get(&format!("https://127.0.0.1:{}/lol-summoner/v1/current-summoner", port))
         .header("Authorization", format!("Basic {}", auth))
-        .send().await;
-
-    // Se la connessione viene rifiutata (client chiuso ma lockfile ancora presente),
-    // usa la cache locale invece di propagare l'errore.
-    let lcu_resp = match lcu_resp {
+        .send().await
+    {
         Ok(r) => r,
         Err(e) => {
             let msg = e.to_string();
@@ -695,7 +814,7 @@ async fn get_profiles(handle: AppHandle) -> Result<Value, String> {
                 || msg.contains("tcp connect") || msg.contains("os error 10061")
                 || msg.contains("os error 111")
             {
-                eprintln!("[RLP] LCU non raggiungibile ({}), provo offline fallback.", msg);
+                eprintln!("[RLP] LCU non raggiungibile, offline fallback.");
                 return offline_fallback(&cached_data).await;
             }
             return Err(msg);
@@ -703,18 +822,13 @@ async fn get_profiles(handle: AppHandle) -> Result<Value, String> {
     };
 
     let current_profile: Value = lcu_resp.json().await.map_err(|_| "Errore JSON profilo")?;
-
     let game_name = current_profile["gameName"].as_str().unwrap_or("").to_string();
     let tag_line  = current_profile["tagLine"].as_str().unwrap_or("").to_string();
 
-    // Se gameName e' un ID temporaneo di match (es: "teambuilder-match-7743720497")
-    // il client e' in uno stato transitorio. Restituiamo la cache se disponibile,
-    // altrimenti segnaliamo che il client non e' pronto.
     if game_name.is_empty() || game_name.contains("-match-") || game_name.starts_with("teambuilder-") {
-        eprintln!("[RLP] gameName transitorio: '{}', uso cache o attendo", game_name);
+        eprintln!("[RLP] gameName transitorio: '{}', uso cache", game_name);
         return cached_data.ok_or("CLIENT_NOT_READY".into());
     }
-
     if tag_line.is_empty() {
         return Err("Impossibile leggere tagLine dal client".into());
     }
@@ -722,39 +836,28 @@ async fn get_profiles(handle: AppHandle) -> Result<Value, String> {
     let puuid = fetch_puuid(&game_name, &tag_line, &client).await
         .ok_or("Impossibile recuperare PUUID da Riot API")?;
 
+    // Cache locale valida (< 30 min, stesso puuid, match con oggetti)
     if let Some(cache) = &cached_data {
-        let cached_puuid      = cache["puuid"].as_str().unwrap_or("");
-        let matches_are_objects = cache["matches"].as_array()
-            .and_then(|arr| arr.first()).map(|f| f.is_object()).unwrap_or(false);
-
-        // Controlla l'età della cache locale (max 30 minuti)
-        let cache_is_fresh = cache["last_update"].as_str()
+        let cached_puuid = cache["puuid"].as_str().unwrap_or("");
+        let has_match_objects = cache["matches"].as_array()
+            .and_then(|a| a.first()).map(|f| f.is_object()).unwrap_or(false);
+        let is_fresh = cache["last_update"].as_str()
             .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-            .map(|dt| {
-                let age = chrono::Utc::now() - dt.with_timezone(&chrono::Utc);
-                age.num_minutes() < 30
-            })
+            .map(|dt| (chrono::Utc::now() - dt.with_timezone(&chrono::Utc)).num_minutes() < 30)
             .unwrap_or(false);
 
-        if cached_puuid == puuid && !puuid.is_empty() && matches_are_objects && cache_is_fresh {
-            let mut cached = cache.clone();
-            // Filtra match pre-season anche dalla cache locale
-            if let Some(matches) = cached.get("matches").cloned() {
+        if cached_puuid == puuid && !puuid.is_empty() && has_match_objects && is_fresh {
+            if let Some(matches) = cache.get("matches").cloned() {
                 let filtered = filter_season_matches(matches);
-                // Se non restano partite Season 2026, la cache è obsoleta → rifresca
-                if filtered.as_array().map(|a| a.is_empty()).unwrap_or(true) {
-                    println!("[RLP] Cache locale contiene solo partite pre-Season 2026, invalido.");
-                } else {
-                    cached["matches"] = filtered;
-                    println!("[RLP] Cache locale valida (< 30 min).");
-                    return Ok(cached);
+                if !filtered.as_array().map(|a| a.is_empty()).unwrap_or(true) {
+                    let mut c = cache.clone();
+                    c["matches"] = filtered;
+                    eprintln!("[RLP] Cache locale valida (< 30 min).");
+                    return Ok(c);
                 }
             } else {
-                println!("[RLP] Cache locale valida (< 30 min).");
-                return Ok(cached);
+                return Ok(cache.clone());
             }
-        } else if cached_puuid == puuid && !cache_is_fresh {
-            println!("[RLP] Cache locale scaduta, rifresco da LCU.");
         }
     }
 
@@ -768,7 +871,6 @@ async fn get_profiles(handle: AppHandle) -> Result<Value, String> {
     let mut match_details: Vec<Value> = vec![];
     for id in match_ids.iter() {
         let detail = fetch_match_detail(id, &client).await;
-        // Salta match vuoti (pre-2026 cancellati da Neon) e custom (queueId == 0)
         if detail.get("metadata").is_none() { continue; }
         let queue_id = detail["info"]["queueId"].as_u64().unwrap_or(1);
         if queue_id != 0 { match_details.push(detail); }
@@ -776,28 +878,44 @@ async fn get_profiles(handle: AppHandle) -> Result<Value, String> {
     }
 
     let final_data = json!({
-        "puuid": puuid, "profile": current_profile, "ranked": ranked,
-        "matches": match_details, "last_update": chrono::Utc::now().to_rfc3339()
+        "puuid":        puuid,
+        "profile":      current_profile,
+        "ranked":       ranked,
+        "matches":      match_details,
+        "last_update":  chrono::Utc::now().to_rfc3339()
     });
+
+    // Indicizza il giocatore loggato nei recenti (fire-and-forget)
+    {
+        let icon_id   = final_data["profile"]["profileIconId"].as_u64().unwrap_or(0);
+        let level     = final_data["profile"]["summonerLevel"].as_u64().unwrap_or(0);
+        let queues    = final_data["ranked"]["queues"].as_array().cloned().unwrap_or_default();
+        let solo      = queues.iter().find(|e| e["queueType"].as_str() == Some("RANKED_SOLO_5x5"));
+        let solo_tier = solo.and_then(|e| e["tier"].as_str()).unwrap_or("").to_string();
+        let solo_rank = solo.and_then(|e| e["rank"].as_str()
+            .or_else(|| e["division"].as_str())).unwrap_or("").to_string();
+        let solo_lp   = solo.and_then(|e| e["leaguePoints"].as_i64()).unwrap_or(0);
+        db_index_summoner(
+            puuid.clone(), game_name.clone(), tag_line.clone(),
+            icon_id, level, solo_tier, solo_rank, solo_lp,
+        );
+    }
+
     let _ = fs::write(cache_p, final_data.to_string());
     Ok(final_data)
 }
 
+/// Carica altri match per il summoner (paginazione).
 #[tauri::command]
 async fn get_more_matches(puuid: String, start: u32) -> Result<Value, String> {
-    let client    = Client::builder().danger_accept_invalid_certs(true).build().unwrap();
+    let client = Client::builder().danger_accept_invalid_certs(true).build().unwrap();
     let match_ids = fetch_match_ids_since(&puuid, start, 10, Some(SEASON_2026_START_SECS), &client).await;
     let mut details: Vec<Value> = vec![];
     for id in match_ids.iter() {
-        println!("Fetching extra match: {}", id);
         let detail = fetch_match_detail(id, &client).await;
-        // Salta match vuoti (pre-2026 cancellati da Neon)
         if detail.get("metadata").is_none() { continue; }
-        // Salta partite custom (queueId == 0)
         let queue_id = detail["info"]["queueId"].as_u64().unwrap_or(1);
         if queue_id == 0 { continue; }
-        // Salta partite pre-Season 2026 (doppio controllo lato dettaglio)
-        const SEASON_2026_START_MS: u64 = 1_767_830_400 * 1000;
         let gc = detail["info"]["gameCreation"].as_u64().unwrap_or(u64::MAX);
         if gc < SEASON_2026_START_MS { continue; }
         details.push(detail);
@@ -806,6 +924,8 @@ async fn get_more_matches(puuid: String, start: u32) -> Result<Value, String> {
     Ok(json!(details))
 }
 
+/// Cerca un summoner per nome#tag via Riot API.
+/// Cache in-memory TTL 10 minuti.
 #[tauri::command]
 async fn search_summoner(game_name: String, tag_line: String) -> Result<Value, String> {
     let client = Client::builder().danger_accept_invalid_certs(true).build().unwrap();
@@ -813,9 +933,15 @@ async fn search_summoner(game_name: String, tag_line: String) -> Result<Value, S
     let puuid = fetch_puuid(&game_name, &tag_line, &client).await
         .ok_or("Summoner non trovato. Controlla nome e tag.")?;
 
-    if let Some(cached) = db_get_summoner(&puuid).await {
-        println!("✓ Cache Neon hit per {}", puuid);
-        return Ok(cached);
+    // Cache check (TTL 10 min)
+    {
+        let cache = summoner_cache().await.read().await;
+        if let Some((ts, cached)) = cache.get(&puuid) {
+            if ts.elapsed() < std::time::Duration::from_secs(600) {
+                eprintln!("[search] cache HIT puuid={:.20}", puuid);
+                return Ok(cached.clone());
+            }
+        }
     }
 
     let account: Value = client
@@ -857,417 +983,61 @@ async fn search_summoner(game_name: String, tag_line: String) -> Result<Value, S
         }).collect();
 
     let profile = json!({
-        "gameName": account["gameName"], "tagLine": account["tagLine"],
-        "summonerLevel": summoner["summonerLevel"], "profileIconId": summoner["profileIconId"],
-        "xpSinceLastLevel": 0, "xpUntilNextLevel": 1,
+        "gameName":          account["gameName"],
+        "tagLine":           account["tagLine"],
+        "summonerLevel":     summoner["summonerLevel"],
+        "profileIconId":     summoner["profileIconId"],
+        "xpSinceLastLevel":  0,
+        "xpUntilNextLevel":  1,
     });
     let matches_json = json!(match_details);
     let ranked_json  = json!(normalized_entries);
 
-    db_save_summoner(&puuid, &profile, &ranked_json, &matches_json).await;
-
-    Ok(json!({
-        "puuid": puuid,
-        "profile": profile,
-        "ranked_entries": ranked_json,
-        "matches": matches_json
-    }))
-}
-
-#[tauri::command]
-async fn get_opgg_data(game_name: String, tag_line: String) -> Result<Value, String> {
-    let client = Client::builder()
-        .danger_accept_invalid_certs(true)
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-        .build().unwrap();
-    let profile_result = call_opgg_tool("lol_get_summoner_profile", json!({
-        "summoner_id": format!("{}#{}", game_name, tag_line), "region": "euw",
-        "desired_output_fields": [
-            "data.summoner.{game_name,tagline,level}",
-            "data.summoner.league_stats[].{game_type,win,lose,is_ranked}",
-            "data.summoner.league_stats[].tier_info.{tier,division,lp}",
-            "data.summoner.most_champion_stats[].{champion_id,play,win,lose,kill,death,assist,kda}"
-        ]
-    }), &client).await;
-    let meta_result = call_opgg_tool("lol_list_lane_meta_champions", json!({
-        "region": "euw",
-        "desired_output_fields": ["data[].{champion_id,position,tier,win_rate,pick_rate,ban_rate,kda}"]
-    }), &client).await;
-    Ok(json!({
-        "profile": profile_result.unwrap_or(json!(null)),
-        "meta":    meta_result.unwrap_or(json!(null)),
-    }))
-}
-
-#[tauri::command]
-async fn list_opgg_tools() -> Result<Value, String> {
-    let client = Client::builder()
-        .danger_accept_invalid_certs(true)
-        .user_agent("Mozilla/5.0")
-        .build().unwrap();
-    let body = json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/list",
-        "params": {}
+    let result = json!({
+        "puuid":           puuid,
+        "profile":         profile,
+        "ranked_entries":  ranked_json,
+        "matches":         matches_json
     });
-    let res = client.post(OPGG_MCP_URL)
-        .header("Content-Type", "application/json")
-        .header("Accept", "application/json, text/event-stream")
-        .json(&body).send().await.map_err(|e| e.to_string())?;
-    let text = res.text().await.map_err(|e| e.to_string())?;
-    for line in text.lines() {
-        if let Some(data) = line.strip_prefix("data: ") {
-            if let Ok(parsed) = serde_json::from_str::<Value>(data) {
-                return Ok(parsed);
-            }
-        }
-    }
-    serde_json::from_str(&text).map_err(|_| format!("Raw: {}", &text[..text.len().min(500)]))
-}
 
-/// Parsa il formato testuale proprietario OP.GG.
-///
-/// STRUTTURA REALE dell'API:
-///   LolListLaneMetaChampions("en_US","all",Data(Positions(
-///     [Top("Ornn",...),Top("Singed",...),...],   ← indice 0 = top
-///     [Top("Ahri",...), ...],                    ← indice 1 = mid
-///     [Top("Kha'Zix",...), ...],                 ← indice 2 = jungle
-///     [Top("Jinx",...), ...],                    ← indice 3 = adc
-///     [Top("Nami",...), ...]                     ← indice 4 = support
-///   )))
-///
-/// NOTA CRITICA: OP.GG usa "Top(" come class name per TUTTE e 5 le lane.
-/// La lane si determina SOLO dalla posizione dell'array (0=top,1=mid,...).
-fn parse_opgg_text(text: &str) -> Value {
-    // Ordine fisso dei 5 array dentro Positions(...)
-    let lane_order = ["top", "mid", "jungle", "adc", "support"];
-    let mut all_champions: Vec<Value> = Vec::new();
-
-    // 1. Trova "Positions([" e il byte-offset dell'apertura '('
-    let marker = "Positions(";
-    let pos_marker_start = match text.find(marker) {
-        Some(p) => p,
-        None => {
-            eprintln!("[parse_opgg_text] 'Positions(' non trovato, fallback");
-            return parse_opgg_text_fallback(text);
-        }
-    };
-    let pos_open = pos_marker_start + marker.len(); // indice della '(' di apertura
-
-    // 2. Estrai tutto il contenuto di Positions(...) contando le parentesi TONDE
-    let positions_content = {
-        let after = &text[pos_open..];
-        let mut depth = 0i32;
-        let mut end = after.len();
-        for (i, ch) in after.char_indices() {
-            match ch {
-                '(' => depth += 1,
-                ')' => {
-                    depth -= 1;
-                    if depth == 0 { end = i; break; }
-                }
-                _ => {}
-            }
-        }
-        // positions_content = "([Top(...),...],[Top(...),...],..." (include le [ ] esterne)
-        &after[..end]
-    };
-
-    eprintln!("[parse_opgg_text] positions_content len={}, anteprima: {}",
-        positions_content.len(),
-        &positions_content[..positions_content.len().min(80)]);
-
-    // 3. Splitta i 5 gruppi trovando ']' a profondità parentetica 0
-    //    positions_content inizia con '(' poi '[', es: "([Top(...),...],[Top(...),...],...)"
-    let mut groups: Vec<&str> = Vec::new();
+    // Salva in cache Turso (solo metadati, fire-and-forget)
     {
-        let chars: Vec<(usize, char)> = positions_content.char_indices().collect();
-        let len = chars.len();
-        let mut depth = 0i32;
-        let mut group_start: Option<usize> = None; // byte-offset dell'apertura '['
-
-        let mut i = 0;
-        while i < len {
-            let (byte_i, ch) = chars[i];
-            match ch {
-                '[' if depth == 0 => {
-                    group_start = Some(byte_i + 1); // dopo la '['
-                }
-                '(' => depth += 1,
-                ')' => depth -= 1,
-                ']' if depth == 0 => {
-                    if let Some(start) = group_start {
-                        groups.push(&positions_content[start..byte_i]);
-                        group_start = None;
-                    }
-                }
-                _ => {}
-            }
-            i += 1;
-        }
+        let icon_id   = profile["profileIconId"].as_u64().unwrap_or(0);
+        let level     = profile["summonerLevel"].as_u64().unwrap_or(0);
+        let solo      = normalized_entries.iter()
+            .find(|e| e["queueType"].as_str() == Some("RANKED_SOLO_5x5"));
+        let solo_tier = solo.and_then(|e| e["tier"].as_str()).unwrap_or("").to_string();
+        let solo_rank = solo.and_then(|e| e["rank"].as_str()).unwrap_or("").to_string();
+        let solo_lp   = solo.and_then(|e| e["leaguePoints"].as_i64()).unwrap_or(0);
+        db_index_summoner(
+            puuid.clone(),
+            account["gameName"].as_str().unwrap_or("").to_string(),
+            account["tagLine"].as_str().unwrap_or("").to_string(),
+            icon_id, level, solo_tier, solo_rank, solo_lp,
+        );
     }
 
-    eprintln!("[parse_opgg_text] Trovati {} gruppi (attesi 5)", groups.len());
+    // Salva in cache
+    summoner_cache().await.write().await
+        .insert(puuid, (std::time::Instant::now(), result.clone()));
 
-    // 4. Per ogni gruppo parsa i record "Top(...)"
-    for (idx, group) in groups.iter().enumerate() {
-        let lane = match lane_order.get(idx) {
-            Some(&l) => l,
-            None => { eprintln!("[parse_opgg_text] gruppo extra idx={}", idx); continue; }
-        };
-
-        let pattern = "Top(";
-        let mut search = *group;
-        let mut count = 0usize;
-
-        while let Some(start_idx) = search.find(pattern) {
-            let rest = &search[start_idx + pattern.len()..];
-
-            // Trova la ')' di chiusura del record contando le parentesi annidate
-            let mut pd = 1i32;
-            let mut end = rest.len();
-            for (i, ch) in rest.char_indices() {
-                match ch {
-                    '(' => pd += 1,
-                    ')' => {
-                        pd -= 1;
-                        if pd == 0 { end = i; break; }
-                    }
-                    _ => {}
-                }
-            }
-
-            let inner = &rest[..end];
-            let values = split_csv(inner);
-
-            if values.len() >= 11 {
-                let champion  = values[0].trim().trim_matches('"').to_string();
-                let win_rate  = values[5].trim().parse::<f64>().unwrap_or(0.5);
-                let pick_rate = values[6].trim().parse::<f64>().unwrap_or(0.0);
-                let ban_rate  = values[8].trim().parse::<f64>().unwrap_or(0.0);
-                let kda       = values[9].trim().parse::<f64>().unwrap_or(0.0);
-                let tier      = values[10].trim().parse::<u64>().unwrap_or(5);
-                let play      = values[2].trim().parse::<u64>().unwrap_or(0);
-                let win       = values[3].trim().parse::<u64>().unwrap_or(0);
-
-                all_champions.push(json!({
-                    "champion_id": champion,
-                    "position":    lane,
-                    "win_rate":    win_rate,
-                    "pick_rate":   pick_rate,
-                    "ban_rate":    ban_rate,
-                    "kda":         kda,
-                    "tier":        tier,
-                    "games":       play,
-                    "wins":        win,
-                }));
-                count += 1;
-            }
-
-            // Avanza oltre questo record
-            search = &rest[end + 1..];
-        }
-
-        eprintln!("[parse_opgg_text] Lane {}: {} campioni", lane, count);
-    }
-
-    eprintln!("[parse_opgg_text] Totale campioni: {}", all_champions.len());
-    json!({ "data": all_champions })
+    Ok(result)
 }
 
-/// Fallback: usato solo se "Positions(" non viene trovato (formato inatteso)
-fn parse_opgg_text_fallback(text: &str) -> Value {
-    eprintln!("[parse_opgg_text_fallback] Tentativo fallback...");
-    // Cerca i 5 blocchi in base alla posizione dei separatori ],[ nel testo
-    // Trova tutti i Top( e assegna le lane in base all'ordine dei gruppi separati da ],[
-    let mut all_champions: Vec<Value> = Vec::new();
-    let lane_order = ["top", "mid", "jungle", "adc", "support"];
-
-    // Trova gli offset dei separatori ],[ di primo livello dopo "Positions(["
-    let base = match text.find("Positions([") {
-        Some(p) => p + "Positions([".len(),
-        None    => 0,
-    };
-
-    // Raccoglie i byte-offset di ogni "],["
-    let mut group_starts: Vec<usize> = vec![base];
-    let sub = &text[base..];
-    let chars: Vec<(usize, char)> = sub.char_indices().collect();
-    let mut depth = 0i32;
-    let mut i = 0;
-    while i < chars.len() {
-        let (bi, ch) = chars[i];
-        match ch {
-            '(' => depth += 1,
-            ')' => depth -= 1,
-            ']' if depth == 0 => {
-                if i + 2 < chars.len() && chars[i+1].1 == ',' && chars[i+2].1 == '[' {
-                    group_starts.push(base + chars[i+3].0);
-                    i += 2;
-                }
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-
-    for (idx, &gs) in group_starts.iter().enumerate() {
-        let lane = match lane_order.get(idx) { Some(&l) => l, None => break };
-        let ge   = group_starts.get(idx + 1).copied().unwrap_or(text.len());
-        let section = &text[gs..ge];
-
-        let mut search = section;
-        while let Some(si) = search.find("Top(") {
-            let rest = &search[si + 4..];
-            let mut pd = 1i32;
-            let mut end = rest.len();
-            for (i, ch) in rest.char_indices() {
-                match ch { '(' => pd += 1, ')' => { pd -= 1; if pd == 0 { end = i; break; } } _ => {} }
-            }
-            let values = split_csv(&rest[..end]);
-            if values.len() >= 11 {
-                let champion  = values[0].trim().trim_matches('"').to_string();
-                let win_rate  = values[5].trim().parse::<f64>().unwrap_or(0.5);
-                let pick_rate = values[6].trim().parse::<f64>().unwrap_or(0.0);
-                let ban_rate  = values[8].trim().parse::<f64>().unwrap_or(0.0);
-                let kda       = values[9].trim().parse::<f64>().unwrap_or(0.0);
-                let tier      = values[10].trim().parse::<u64>().unwrap_or(5);
-                let play      = values[2].trim().parse::<u64>().unwrap_or(0);
-                let win       = values[3].trim().parse::<u64>().unwrap_or(0);
-                all_champions.push(json!({
-                    "champion_id": champion, "position": lane,
-                    "win_rate": win_rate, "pick_rate": pick_rate, "ban_rate": ban_rate,
-                    "kda": kda, "tier": tier, "games": play, "wins": win,
-                }));
-            }
-            search = &rest[end + 1..];
-        }
-    }
-
-    eprintln!("[parse_opgg_text_fallback] Totale: {}", all_champions.len());
-    json!({ "data": all_champions })
-}
-
-/// Splitta CSV rispettando le stringhe tra virgolette
-fn split_csv(s: &str) -> Vec<String> {
-    let mut result = Vec::new();
-    let mut current = String::new();
-    let mut in_quotes = false;
-    for ch in s.chars() {
-        match ch {
-            '"' => in_quotes = !in_quotes,
-            ',' if !in_quotes => {
-                result.push(current.clone());
-                current.clear();
-            }
-            _ => current.push(ch),
-        }
-    }
-    if !current.is_empty() { result.push(current); }
-    result
-}
-
-/// Alias per compatibilità con il frontend che chiama "get_rlp_matches"
-#[tauri::command]
-async fn get_rlp_matches(summoner_id: String, region: String, limit: u32) -> Result<Value, String> {
-    get_opgg_matches(summoner_id, region, limit).await
-}
-
-#[tauri::command]
-async fn get_opgg_matches(summoner_id: String, region: String, limit: u32) -> Result<Value, String> {
-    let client = Client::builder()
-        .danger_accept_invalid_certs(true)
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-        .build().unwrap();
-
-    let result = call_opgg_tool("lol_list_summoner_matches", json!({
-        "summoner_id": summoner_id,
-        "region": region,
-        "limit": limit,
-        "desired_output_fields": [
-            "data[].{game_id,created_at,is_win,champion_id,position,kill,death,assist,cs,game_length_second}",
-            "data[].items[].id",
-            "data[].participants[].{summoner_id,champion_id,position,kill,death,assist,is_win,team_key}"
-        ]
-    }), &client).await?;
-
-    // Normalizza in un array di match compatibile con il frontend
-    let empty = vec![];
-    let matches_raw = result["data"].as_array().unwrap_or(&empty);
-
-    let matches: Vec<Value> = matches_raw.iter().map(|m| {
-        let participants: Vec<Value> = m["participants"].as_array().unwrap_or(&empty).iter().map(|p| {
-            let team_key = p["team_key"].as_str().unwrap_or("blue");
-            let raw_id = p["summoner_id"].as_str().unwrap_or("");
-            // OP.GG restituisce summoner_id come "Nome#TAG" — splittiamo
-            let (game_name, tag_line) = if let Some(idx) = raw_id.find('#') {
-                (&raw_id[..idx], &raw_id[idx+1..])
-            } else {
-                (raw_id, "EUW")
-            };
-            json!({
-                "teamId": if team_key == "blue" { 100 } else { 200 },
-                "summonerName": raw_id,
-                "riotIdGameName": game_name,
-                "riotIdTagline": tag_line,
-                "championName": p["champion_id"].as_str().unwrap_or(""),
-                "kills": p["kill"].as_u64().unwrap_or(0),
-                "deaths": p["death"].as_u64().unwrap_or(0),
-                "assists": p["assist"].as_u64().unwrap_or(0),
-                "win": p["is_win"].as_bool().unwrap_or(false),
-                "isMe": raw_id == summoner_id.as_str()
-            })
-        }).collect();
-
-        // Determina teamId del giocatore cercato
-        let my_team_id: u64 = participants.iter()
-            .find(|p| p["isMe"].as_bool().unwrap_or(false))
-            .and_then(|p| p["teamId"].as_u64())
-            .unwrap_or(100);
-
-        let items: Vec<Value> = m["items"].as_array().unwrap_or(&empty).iter()
-            .map(|i| json!(i["id"].as_u64().unwrap_or(0)))
-            .collect();
-
-        json!({
-            "matchId": m["game_id"],
-            "win": m["is_win"].as_bool().unwrap_or(false),
-            "championName": m["champion_id"].as_str().unwrap_or(""),
-            "position": m["position"].as_str().unwrap_or(""),
-            "kills": m["kill"].as_u64().unwrap_or(0),
-            "deaths": m["death"].as_u64().unwrap_or(0),
-            "assists": m["assist"].as_u64().unwrap_or(0),
-            "totalMinionsKilled": m["cs"].as_u64().unwrap_or(0),
-            "gameDuration": m["game_length_second"].as_u64().unwrap_or(0),
-            "gameCreation": m["created_at"],
-            "items": items,
-            "teamId": my_team_id,
-            "participants": participants
-        })
-    }).collect();
-
-    eprintln!("[get_opgg_matches] {} partite restituite per {}", matches.len(), summoner_id);
-
-    // Filtra solo partite Season 2026 — created_at è ISO string "2026-01-15T..."
-    let season_start = chrono::DateTime::parse_from_rfc3339("2026-01-08T00:00:00Z")
-        .unwrap()
-        .with_timezone(&chrono::Utc);
-
-    let matches: Vec<Value> = matches.into_iter().filter(|m| {
-        let created_at = m["gameCreation"].as_str().unwrap_or("");
-        if created_at.is_empty() { return true; } // se mancante, teniamo
-        chrono::DateTime::parse_from_rfc3339(created_at)
-            .map(|dt| dt.with_timezone(&chrono::Utc) >= season_start)
-            .unwrap_or(true)
-    }).collect();
-
-    eprintln!("[get_opgg_matches] {} partite dopo filtro Season 2026", matches.len());
-    Ok(json!(matches))
-}
-
+/// Tier list via OP.GG MCP — cache in-memory 15 minuti.
 #[tauri::command]
 async fn get_tier_list() -> Result<String, String> {
+    {
+        let cache = tier_list_cache().await.read().await;
+        if let Some((ts, cached)) = cache.as_ref() {
+            if ts.elapsed() < std::time::Duration::from_secs(900) {
+                eprintln!("[tier_list] cache HIT ({:.0}s)", ts.elapsed().as_secs_f32());
+                return Ok(cached.clone());
+            }
+        }
+    }
+    eprintln!("[tier_list] cache MISS — fetching OP.GG MCP");
+
     let client = Client::builder()
         .danger_accept_invalid_certs(true)
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
@@ -1276,557 +1046,96 @@ async fn get_tier_list() -> Result<String, String> {
     let body = json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": { "name": "lol_list_lane_meta_champions", "arguments": {
-            "region": "euw",
-            "lang": "en_US",
-            "position_filter": "all"
+            "region": "euw", "lang": "en_US", "position_filter": "all"
         }}
     });
 
-    let res = client.post(OPGG_MCP_URL)
+    let raw_text = client.post(OPGG_MCP_URL)
         .header("Content-Type", "application/json")
         .header("Accept", "application/json, text/event-stream")
-        .json(&body).send().await.map_err(|e| e.to_string())?;
+        .json(&body).send().await.map_err(|e| e.to_string())?
+        .text().await.map_err(|e| e.to_string())?;
 
-    let raw_text = res.text().await.map_err(|e| e.to_string())?;
+    eprintln!("[tier_list] risposta {} bytes, anteprima: {}", raw_text.len(), &raw_text[..raw_text.len().min(200)]);
 
-    eprintln!("[get_tier_list] Risposta ricevuta, lunghezza: {} bytes", raw_text.len());
-    eprintln!("[get_tier_list] Primi 400 chars: {}", &raw_text[..raw_text.len().min(400)]);
-
-    // Scansiona ogni riga della risposta SSE/JSON
     for line in raw_text.lines() {
-        let line = line.trim();
-        if line.is_empty() { continue; }
-
-        // Rimuovi il prefisso "data: " se presente
-        let data_str = line.strip_prefix("data: ").unwrap_or(line);
-
+        let data_str = line.trim().strip_prefix("data: ").unwrap_or(line.trim());
+        if data_str.is_empty() { continue; }
         if let Ok(parsed) = serde_json::from_str::<Value>(data_str) {
-            // Struttura principale: result.content[].text
-            if let Some(content) = parsed["result"]["content"].as_array() {
-                for item in content {
-                    if item["type"] == "text" {
-                        if let Some(text_val) = item["text"].as_str() {
-                            eprintln!("[get_tier_list] Trovato testo via result.content, len={}", text_val.len());
-                            return Ok(text_val.to_string());
-                        }
-                    }
-                }
-            }
-            // Struttura alternativa: params.content[].text (alcuni server MCP)
-            if let Some(content) = parsed["params"]["content"].as_array() {
-                for item in content {
-                    if item["type"] == "text" {
-                        if let Some(text_val) = item["text"].as_str() {
-                            eprintln!("[get_tier_list] Trovato testo via params.content, len={}", text_val.len());
-                            return Ok(text_val.to_string());
-                        }
-                    }
-                }
-            }
-            // Struttura alternativa 2: content[].text diretto
-            if let Some(content) = parsed["content"].as_array() {
-                for item in content {
-                    if item["type"] == "text" {
-                        if let Some(text_val) = item["text"].as_str() {
-                            eprintln!("[get_tier_list] Trovato testo via content, len={}", text_val.len());
-                            return Ok(text_val.to_string());
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Log della risposta completa per debug
-    eprintln!("[get_tier_list] ERRORE - risposta completa:\n{}", raw_text);
-    Err(format!(
-        "Nessun testo trovato nella risposta OP.GG. Primi 400 chars: {}",
-        &raw_text[..raw_text.len().min(400)]
-    ))
-}
-
-// ── Live Game (Spectator-V5 + League-V4 rank in parallelo) ───────────────────
-
-fn spell_id_to_ddragon(id: u64) -> &'static str {
-    match id {
-        4  => "SummonerFlash",    14 => "SummonerDot",
-        12 => "SummonerTeleport", 21 => "SummonerBarrier",
-        3  => "SummonerExhaust",  6  => "SummonerHaste",
-        7  => "SummonerHeal",     1  => "SummonerBoost",
-        11 => "SummonerSmite",    13 => "SummonerMana",
-        32 => "SummonerSnowball", _  => "SummonerFlash",
-    }
-}
-
-/// Chiama la Live Client Data API locale (porta 2999) — disponibile SOLO quando
-/// sei personalmente in partita. Non richiede API key.
-async fn fetch_live_client_data(client: &Client) -> Option<Value> {
-    // /liveclientdata/allgamedata contiene tutto: giocatori, score, eventi
-    let url = "https://127.0.0.1:2999/liveclientdata/allgamedata";
-    let res = client.get(url).send().await.ok()?;
-    if !res.status().is_success() { return None; }
-    let data: Value = res.json().await.ok()?;
-    // Se non ha "allPlayers" non è una risposta valida
-    if data["allPlayers"].as_array().is_none() { return None; }
-    Some(data)
-}
-
-/// Normalizza la risposta della Live Client Data API nel formato interno.
-fn build_live_game_from_lcd(lcd: &Value, my_summoner_name: &str) -> Value {
-    let game_data  = &lcd["gameData"];
-    let queue_id   = game_data["gameMode"].as_str().unwrap_or("");
-    let queue_type = match queue_id {
-        "CLASSIC"           => "Normal/Ranked",
-        "ARAM"              => "ARAM",
-        "URF"               => "URF",
-        "ARURF"             => "ARURF",
-        "ONEFORALL"         => "One for All",
-        "NEXUSBLITZ"        => "Nexus Blitz",
-        "ULTBOOK"           => "Ultimate Spellbook",
-        "CHERRY"            => "Arena",
-        "TUTORIAL"          => "Tutorial",
-        "PRACTICETOOL"      => "Practice Tool",
-        other               => other,
-    }.to_string();
-
-    let game_time_f = game_data["gameTime"].as_f64().unwrap_or(0.0);
-    let game_length = game_time_f as u64;
-
-    let empty = vec![];
-    let all_players = lcd["allPlayers"].as_array().unwrap_or(&empty);
-
-    // Identifica il team del giocatore corrente
-    let my_team = all_players.iter()
-        .find(|p| {
-            let name = p["summonerName"].as_str().unwrap_or("");
-            name.eq_ignore_ascii_case(my_summoner_name) ||
-            name.eq_ignore_ascii_case(my_summoner_name.split('#').next().unwrap_or(""))
-        })
-        .and_then(|p| p["team"].as_str())
-        .unwrap_or("ORDER");
-
-    let players: Vec<Value> = all_players.iter().map(|p| {
-        let name      = p["summonerName"].as_str().unwrap_or("").to_string();
-        let champ     = p["championName"].as_str().unwrap_or("").to_string();
-        let team_str  = p["team"].as_str().unwrap_or("ORDER");
-        let is_me     = name.eq_ignore_ascii_case(my_summoner_name)
-            || name.eq_ignore_ascii_case(my_summoner_name.split('#').next().unwrap_or(""));
-
-        // Spell mapping LCD → DDragon
-        fn map_spell(s: &str) -> &str {
-            match s {
-                "SummonerFlash"     => "SummonerFlash",
-                "SummonerDot"       => "SummonerDot",
-                "SummonerTeleport"  => "SummonerTeleport",
-                "SummonerBarrier"   => "SummonerBarrier",
-                "SummonerExhaust"   => "SummonerExhaust",
-                "SummonerHaste"     => "SummonerHaste",
-                "SummonerHeal"      => "SummonerHeal",
-                "SummonerBoost"     => "SummonerBoost",
-                "SummonerSmite"     => "SummonerSmite",
-                "SummonerMana"      => "SummonerMana",
-                "SummonerSnowball"  => "SummonerSnowball",
-                other               => other,
-            }
-        }
-
-        let spell1 = p["summonerSpells"]["summonerSpellOne"]["displayName"]
-            .as_str().unwrap_or("SummonerFlash");
-        let spell2 = p["summonerSpells"]["summonerSpellTwo"]["displayName"]
-            .as_str().unwrap_or("SummonerFlash");
-
-        json!({
-            "summoner_name":     name,
-            "puuid":             "",
-            "champion_id":       0,
-            "champion_name":     champ,
-            "profile_icon_id":   0,
-            "team":              team_str,
-            "spell1":            map_spell(spell1),
-            "spell2":            map_spell(spell2),
-            "tier":              "",
-            "rank":              "",
-            "lp":                0,
-            "is_me":             is_me,
-            // Smart badge fields — vuoti per LCD (nessun PUUID disponibile)
-            "summoner_level":    null,
-            "main_champion":     null,
-            "main_role":         null,
-            "total_games":       0,
-            "games_on_champion": 0,
-        })
-    }).collect();
-
-    // Ban dalla LCD (non sempre disponibili)
-    let bans_blue = lcd["teamData"]["bannedChampions"].as_array()
-        .unwrap_or(&empty).iter()
-        .map(|b| json!({
-            "champion_id": b["championId"].as_i64().unwrap_or(-1),
-            "team": "ORDER",
-            "pick_turn": b["pickTurn"].as_u64().unwrap_or(0),
-        })).collect::<Vec<_>>();
-
-    json!({
-        "in_game":          true,
-        "game_time":        game_length,
-        "game_start_time":  0,
-        "queue_type":       queue_type,
-        "game_id":          0,
-        "banned_champions": bans_blue,
-        "players":          players,
-        "duo_pairs":        [],
-        "_source":          "lcd",
-    })
-}
-
-/// Chiama Spectator-V5. L'endpoint /by-summoner/ in V5 accetta il PUUID (non più il summoner ID cifrato).
-async fn fetch_spectator(puuid: &str, client: &Client) -> Option<Value> {
-    let url = format!(
-        "https://euw1.api.riotgames.com/lol/spectator/v5/active-games/by-summoner/{}",
-        puuid
-    );
-    let res = match client.get(&url)
-        .header("X-Riot-Token", riot_api_key())
-        .timeout(std::time::Duration::from_secs(8))
-        .send().await {
-        Ok(r)  => r,
-        Err(e) => { eprintln!("[Spectator] Errore rete/timeout: {}", e); return None; }
-    };
-    let code = res.status().as_u16();
-    eprintln!("[Spectator] HTTP {} per puuid={}", code, &puuid[..puuid.len().min(20)]);
-    if code == 404 || code == 403 || code == 400 { return None; }
-    if code != 200 {
-        let body = res.text().await.unwrap_or_default();
-        eprintln!("[Spectator] Risposta non-200: {}", &body[..body.len().min(300)]);
-        return None;
-    }
-    let data: Value = match res.json().await {
-        Ok(v)  => v,
-        Err(e) => { eprintln!("[Spectator] JSON parse error: {}", e); return None; }
-    };
-    if data.get("status").is_some() {
-        eprintln!("[Spectator] Risposta errore Riot: {:?}", data["status"]);
-        return None;
-    }
-    eprintln!("[Spectator] OK — gameId={}, participants={}",
-        data["gameId"], data["participants"].as_array().map(|a| a.len()).unwrap_or(0));
-    Some(data)
-}
-
-/// Recupera ranked SoloQ (fallback Flex) per un puuid via League-V4.
-async fn fetch_ranked_entry(puuid: String, client: Client) -> (String, String, i64) {
-    if puuid.is_empty() { return (String::new(), String::new(), 0); }
-    let url = format!(
-        "https://euw1.api.riotgames.com/lol/league/v4/entries/by-puuid/{}",
-        puuid
-    );
-    let entries: Vec<Value> = match client.get(&url)
-        .header("X-Riot-Token", riot_api_key())
-        .send().await
-    {
-        Ok(r)  => r.json().await.unwrap_or_default(),
-        Err(_) => vec![],
-    };
-    for queue in &["RANKED_SOLO_5x5", "RANKED_FLEX_SR"] {
-        if let Some(e) = entries.iter().find(|e| e["queueType"].as_str() == Some(queue)) {
-            let tier = e["tier"].as_str().unwrap_or("").to_uppercase();
-            let rank = e["rank"].as_str().unwrap_or("").to_uppercase();
-            let lp   = e["leaguePoints"].as_i64().unwrap_or(0);
-            if !tier.is_empty() && tier != "NONE" {
-                return (tier, rank, lp);
-            }
-        }
-    }
-    (String::new(), String::new(), 0)
-}
-
-/// Cerca nella Neon summoner_cache i dati per i smart badge:
-/// summoner_level, main_role (lane più giocata), main_champion (champ più giocato),
-/// total_games (partite in cache), games_on_champion (partite sul champ più giocato).
-/// Se il puuid non è in cache restituisce None silenziosamente.
-async fn smart_data_from_cache(puuid: &str) -> Option<Value> {
-    if puuid.is_empty() { return None; }
-    let pool = get_pool().await?;
-    let pg   = pool.get().await
-        .map_err(|e| eprintln!("[smart_data] pool error: {}", e)).ok()?;
-
-    let row = pg.query_opt(
-        "SELECT profile::text, matches::text FROM summoner_cache WHERE puuid = $1",
-        &[&puuid],
-    ).await.ok()??;
-
-    let profile: Value = serde_json::from_str(&row.get::<_, String>(0)).ok()?;
-    let matches: Value = serde_json::from_str(&row.get::<_, String>(1)).ok()?;
-
-    let summoner_level = profile["summonerLevel"].as_u64();
-
-    let mut champ_counts: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
-    let mut role_counts:  std::collections::HashMap<String, u64> = std::collections::HashMap::new();
-    let mut total_games: u64 = 0;
-
-    if let Some(arr) = matches.as_array() {
-        for m in arr {
-            let participants = m["info"]["participants"].as_array()
-                .cloned().unwrap_or_default();
-            if let Some(me) = participants.iter().find(|p| p["puuid"].as_str() == Some(puuid)) {
-                total_games += 1;
-                // Champion name (Riot Match V5)
-                if let Some(champ) = me["championName"].as_str() {
-                    if !champ.is_empty() {
-                        *champ_counts.entry(champ.to_string()).or_insert(0) += 1;
-                    }
-                }
-                // Lane/role: teamPosition è la più affidabile (TOP/JUNGLE/MIDDLE/BOTTOM/UTILITY)
-                let role = me["teamPosition"].as_str()
-                    .filter(|s| !s.is_empty())
-                    .or_else(|| me["individualPosition"].as_str().filter(|s| !s.is_empty()))
-                    .or_else(|| me["lane"].as_str().filter(|s| !s.is_empty() && *s != "NONE"));
-                if let Some(r) = role {
-                    *role_counts.entry(r.to_string()).or_insert(0) += 1;
-                }
-            }
-        }
-    }
-
-    let main_champion: Option<String> = champ_counts.iter()
-        .max_by_key(|(_, v)| *v)
-        .map(|(k, _)| k.clone());
-
-    let main_role: Option<String> = role_counts.iter()
-        .max_by_key(|(_, v)| *v)
-        .map(|(k, _)| k.clone());
-
-    // Partite giocate sul campione principale (proxy per games_on_champion)
-    let games_on_main_champ: u64 = main_champion.as_ref()
-        .and_then(|c| champ_counts.get(c))
-        .copied()
-        .unwrap_or(0);
-
-    eprintln!(
-        "[smart_data] puuid={} lvl={:?} main_champ={:?} main_role={:?} total={} goc={}",
-        &puuid[..puuid.len().min(20)],
-        summoner_level, main_champion, main_role, total_games, games_on_main_champ
-    );
-
-    Some(json!({
-        "summoner_level":      summoner_level,
-        "main_champion":       main_champion,
-        "main_role":           main_role,
-        "total_games":         total_games,
-        "games_on_main_champ": games_on_main_champ,
-        // Mappa completa dei conteggi per campione (per games_on_champion accurato)
-        "champ_counts":        champ_counts,
-    }))
-}
-
-/// Normalizza Spectator-V5 recuperando i rank in parallelo con tokio::spawn.
-async fn build_live_game_response(raw: &Value, my_puuid: &str, client: &Client) -> Value {
-    let queue_id   = raw["gameQueueConfigId"].as_u64().unwrap_or(0);
-    let queue_type = match queue_id {
-        // Ranked
-        420  => "Ranked Solo/Duo",
-        440  => "Ranked Flex",
-        // Normal
-        400  => "Normal Draft",
-        430  => "Normal Blind",
-        // ARAM
-        450  => "ARAM",
-        // URF / ARURF
-        900  => "URF",
-        1900 => "URF",
-        1010 => "ARURF",
-        1012 => "ARURF",
-        // One for All
-        1020 => "One for All",
-        // Arena (2v2v2v2)
-        1700 => "Arena",
-        1710 => "Arena",
-        // Ultimate Spellbook
-        1400 => "Ultimate Spellbook",
-        // Nexus Blitz
-        700  => "Nexus Blitz",
-        // Clash
-        600  => "Clash",
-        // Rotating/misc
-        830  => "Intro Bot",
-        840  => "Beginner Bot",
-        850  => "Intermediate Bot",
-        2000 => "Tutorial 1",
-        2010 => "Tutorial 2",
-        2020 => "Tutorial 3",
-        // Swiftplay
-        480  => "Swiftplay",
-        // Draft Pick 5v5
-        490  => "Normal Draft (Quickplay)",
-        // Snow/event variants
-        1300 => "Nexus Blitz",
-        325  => "All Random",
-        72   => "1v1 Snowdown",
-        73   => "2v2 Snowdown",
-        76   => "URF",
-        318  => "URF",
-        _    => "Other",
-    }.to_string();
-
-    let game_length     = raw["gameLength"].as_u64().unwrap_or(0);
-    let game_start_time = raw["gameStartTime"].as_i64().unwrap_or(0); // epoch ms
-
-    // Ban: lista di { champion_id, team_id, pick_turn }
-    let empty_arr = vec![];
-    let banned: Vec<Value> = raw["bannedChampions"].as_array().unwrap_or(&empty_arr)
-        .iter().map(|b| json!({
-            "champion_id": b["championId"].as_i64().unwrap_or(-1),
-            "team":        if b["teamId"].as_u64().unwrap_or(100) == 100 { "ORDER" } else { "CHAOS" },
-            "pick_turn":   b["pickTurn"].as_u64().unwrap_or(0),
-        })).collect();
-
-    let participants = raw["participants"].as_array().unwrap_or(&empty_arr);
-
-    // Lancia tutte le chiamate ranked in parallelo con tokio::spawn
-    let handles: Vec<_> = participants.iter().map(|p| {
-        let puuid  = p["puuid"].as_str().unwrap_or("").to_string();
-        let client = client.clone();
-        tokio::spawn(async move { fetch_ranked_entry(puuid, client).await })
-    }).collect();
-
-    let mut ranks: Vec<(String, String, i64)> = Vec::new();
-    for h in handles {
-        ranks.push(h.await.unwrap_or_default());
-    }
-
-    // ── Smart data (per badge smurf / off-role / OTP / main bannato) ─────────
-    // Legge dalla Neon summoner_cache — zero API call extra, latenza minima.
-    let smart_handles: Vec<_> = participants.iter().map(|p| {
-        let puuid_s = p["puuid"].as_str().unwrap_or("").to_string();
-        tokio::spawn(async move { smart_data_from_cache(&puuid_s).await })
-    }).collect();
-
-    let mut smart_data: Vec<Option<Value>> = Vec::new();
-    for h in smart_handles {
-        smart_data.push(h.await.unwrap_or(None));
-    }
-
-    let players: Vec<Value> = participants.iter()
-        .zip(ranks.iter())
-        .zip(smart_data.iter())
-        .map(|((p, (tier, rank, lp)), smart)| {
-            let champ_id      = p["championId"].as_u64().unwrap_or(0);
-            let team_id       = p["teamId"].as_u64().unwrap_or(100);
-            let puuid_p       = p["puuid"].as_str().unwrap_or("");
-            let is_me         = !my_puuid.is_empty() && puuid_p == my_puuid;
-            let profile_icon  = p["profileIconId"].as_u64().unwrap_or(0);
-            let riot_id       = p["riotId"].as_str().unwrap_or("");
-            let name          = if !riot_id.is_empty() {
-                riot_id.to_string()
-            } else {
-                p["summonerName"].as_str().unwrap_or("").to_string()
-            };
-
-            // Estrai i valori smart (se disponibili dalla cache Neon)
-            let (summoner_level, main_champion, main_role, total_games, games_on_champion) =
-                if let Some(sd) = smart {
-                    let lvl   = sd["summoner_level"].as_u64();
-                    let mc    = sd["main_champion"].as_str().map(|s| s.to_string());
-                    let mr    = sd["main_role"].as_str().map(|s| s.to_string());
-                    let tg    = sd["total_games"].as_u64().unwrap_or(0);
-                    // Se il campione corrente è in cache, usa il suo conteggio specifico
-                    let goc   = sd["champ_counts"].as_object()
-                        .and_then(|_| {
-                            // champ_counts è serializzato come {"ChampName": count, ...}
-                            // ma il champ_id qui è numerico; usiamo games_on_main_champ come proxy
-                            // (il frontend usa games_on_champion vs total_games per OTP)
-                            sd["games_on_main_champ"].as_u64()
-                        })
-                        .unwrap_or(0);
-                    (lvl, mc, mr, tg, goc)
-                } else {
-                    (None, None, None, 0u64, 0u64)
-                };
-
-            json!({
-                "summoner_name":     name,
-                "puuid":             puuid_p,
-                "champion_id":       champ_id,
-                "champion_name":     "",
-                "profile_icon_id":   profile_icon,
-                "team":              if team_id == 100 { "ORDER" } else { "CHAOS" },
-                "spell1":            spell_id_to_ddragon(p["spell1Id"].as_u64().unwrap_or(0)),
-                "spell2":            spell_id_to_ddragon(p["spell2Id"].as_u64().unwrap_or(0)),
-                "tier":              tier,
-                "rank":              rank,
-                "lp":                lp,
-                "is_me":             is_me,
-                // ── Smart badge fields ─────────────────────────────────────
-                "summoner_level":    summoner_level,
-                "main_champion":     main_champion,
-                "main_role":         main_role,
-                "total_games":       total_games,
-                "games_on_champion": games_on_champion,
-            })
-        })
-        .collect();
-
-    // ── Duo detection ────────────────────────────────────────────────────────
-    // Controlla nelle recenti partite (Neon cache) chi appare spesso con "me"
-    let mut duo_pairs: Vec<Value> = vec![];
-    if !my_puuid.is_empty() {
-        // Recupera match recenti del giocatore dalla cache Neon
-        if let Some(pool) = get_pool().await {
-            if let Ok(pg) = pool.get().await {
-                // Trova le ultime 20 partite dove appare my_puuid
-                if let Ok(rows) = pg.query(
-                    "SELECT data::text FROM match_cache WHERE data::text LIKE $1 LIMIT 20",
-                    &[&format!("%{}%", my_puuid)],
-                ).await {
-                    let mut coplay: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
-                    for row in &rows {
-                        let raw: String = row.get(0);
-                        if let Ok(m) = serde_json::from_str::<Value>(&raw) {
-                            let participants = m["info"]["participants"].as_array()
-                                .cloned().unwrap_or_default();
-                            let my_team = participants.iter()
-                                .find(|p| p["puuid"].as_str() == Some(my_puuid))
-                                .and_then(|p| p["teamId"].as_u64());
-                            if let Some(tid) = my_team {
-                                for p in &participants {
-                                    let puuid = p["puuid"].as_str().unwrap_or("");
-                                    if puuid != my_puuid && p["teamId"].as_u64() == Some(tid) {
-                                        *coplay.entry(puuid.to_string()).or_insert(0) += 1;
-                                    }
-                                }
+            for path in &[
+                parsed.pointer("/result/content"),
+                parsed.pointer("/params/content"),
+                parsed.pointer("/content"),
+            ] {
+                if let Some(content) = path.and_then(|v| v.as_array()) {
+                    for item in content {
+                        if item["type"] == "text" {
+                            if let Some(text_val) = item["text"].as_str() {
+                                *tier_list_cache().await.write().await =
+                                    Some((std::time::Instant::now(), text_val.to_string()));
+                                return Ok(text_val.to_string());
                             }
                         }
                     }
-                    // Considera duo chi ha giocato >= 3 partite insieme
-                    for (puuid, count) in &coplay {
-                        if *count >= 3 {
-                            duo_pairs.push(json!([my_puuid, puuid]));
-                        }
-                    }
                 }
             }
         }
     }
 
-    // Indicizza i partecipanti nel DB per arricchire il live search futuro (fire-and-forget)
-    db_index_live_players(&players).await;
-
-    json!({
-        "in_game":         true,
-        "game_time":       game_length,
-        "game_start_time": game_start_time,
-        "queue_type":      queue_type,
-        "game_id":         raw["gameId"],
-        "banned_champions": banned,
-        "players":         players,
-        "duo_pairs":       duo_pairs,
-    })
+    Err(format!("Nessun testo nella risposta OP.GG. Anteprima: {}", &raw_text[..raw_text.len().min(400)]))
 }
 
-/// Live Game per il giocatore loggato: prova LCD (porta 2999) e Spectator V5 in parallelo,
-/// usa il primo che risponde positivamente.
+/// Indicizza in Turso tutti i player di un live game che hanno puuid + summoner_name noti.
+/// Fire-and-forget (spawn) — non blocca il return del live game.
+fn index_live_players(players: &Value) {
+    let arr = match players.as_array() {
+        Some(a) => a.clone(),
+        None => return,
+    };
+    for p in arr {
+        let puuid = match p["puuid"].as_str() {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => continue,
+        };
+        let name_tag = p["summoner_name"].as_str().unwrap_or("").to_string();
+        if name_tag.is_empty() { continue; }
+        let (game_name, tag_line) = if name_tag.contains('#') {
+            let mut it = name_tag.splitn(2, '#');
+            (it.next().unwrap_or("").to_string(), it.next().unwrap_or("EUW1").to_string())
+        } else {
+            (name_tag, "EUW1".to_string())
+        };
+        if game_name.is_empty() { continue; }
+        let icon_id  = p["profile_icon_id"].as_u64().unwrap_or(0);
+        let level    = p["summoner_level"].as_u64().unwrap_or(0);
+        let tier     = p["tier"].as_str().unwrap_or("").to_string();
+        let rank     = p["rank"].as_str().unwrap_or("").to_string();
+        let lp       = p["lp"].as_i64().unwrap_or(0);
+        db_index_summoner(puuid, game_name, tag_line, icon_id, level, tier, rank, lp);
+    }
+}
+
+/// Live game per il giocatore loggato: LCD (porta 2999) + Spectator V5 in parallelo.
 #[tauri::command]
 async fn get_live_game() -> Result<Value, String> {
+    // Cache hit — non serviamo se dati ranked incompleti (timeout al primo caricamento).
+    {
+        let cache = live_game_cache().await.read().await;
+        if let Some((ts, cached)) = cache.get("self") {
+            if ts.elapsed() < std::time::Duration::from_secs(25) {
+                let players = cached["players"].as_array().map(|a| a.len()).unwrap_or(0);
+                let ranked_count = cached["players"].as_array().map(|a|
+                    a.iter().filter(|p| !p["tier"].as_str().unwrap_or("").is_empty()).count()
+                ).unwrap_or(0);
+                let queue = cached["queue_type"].as_str().unwrap_or("");
+                let is_ranked = queue.contains("Ranked");
+                if !is_ranked || players == 0 || ranked_count * 2 >= players {
+                    return Ok(cached.clone());
+                }
+                eprintln!("[LiveGame] Cache ranked incompleta ({}/{}), refresh", ranked_count, players);
+            }
+        }
+    }
     let lock_path = get_lockfile_path().ok_or("CLIENT_CLOSED")?;
     let content   = fs::read_to_string(&lock_path).map_err(|_| "CLIENT_CLOSED")?;
     let parts: Vec<&str> = content.split(':').collect();
@@ -1836,7 +1145,6 @@ async fn get_live_game() -> Result<Value, String> {
     let auth     = general_purpose::STANDARD.encode(format!("riot:{}", password));
     let client   = Client::builder().danger_accept_invalid_certs(true).build().unwrap();
 
-    // Legge il nome summoner + puuid dal LCU
     let me: Value = client
         .get(&format!("https://127.0.0.1:{}/lol-summoner/v1/current-summoner", port))
         .header("Authorization", format!("Basic {}", auth))
@@ -1847,7 +1155,6 @@ async fn get_live_game() -> Result<Value, String> {
     let my_summoner_name = me["gameName"].as_str().unwrap_or("").to_string();
     if my_puuid.is_empty() { return Err("CLIENT_CLOSED".into()); }
 
-    // Prova LCD e Spectator in parallelo
     let client_lcd       = client.clone();
     let client_spectator = client.clone();
     let puuid_for_spec   = my_puuid.clone();
@@ -1859,289 +1166,299 @@ async fn get_live_game() -> Result<Value, String> {
     });
 
     let spec_handle = tokio::spawn(async move {
-        match fetch_spectator(&puuid_for_spec, &client_spectator).await {
-            Some(raw) => Some(raw),
-            None      => None,
-        }
+        fetch_spectator(&puuid_for_spec, &client_spectator).await
     });
 
-    // Aspetta LCD per primo (risposta locale, ~1ms), poi Spectator
-    let lcd_result = lcd_handle.await.unwrap_or(None);
+    // LCD prima (risposta locale ~1ms).
+    // Aspetta anche Spectator in parallelo: ci servono i puuid (LCD non li ha).
+    let (lcd_result, spec_raw) = tokio::join!(
+        async { lcd_handle.await.unwrap_or(None) },
+        async { spec_handle.await.unwrap_or(None) }
+    );
+
     if let Some(mut resp) = lcd_result {
-        eprintln!("[LiveGame] Fonte: LCD (porta 2999)");
+        eprintln!("[LiveGame] Fonte: LCD");
 
-        // Arricchisce con rank: usa i names che hanno il tag (#) per ricavare PUUID
-        let players_snap = resp["players"].as_array().cloned().unwrap_or_default();
-        let rank_handles: Vec<_> = players_snap.iter().map(|p| {
-            let name    = p["summoner_name"].as_str().unwrap_or("").to_string();
-            let client2 = client.clone();
-            tokio::spawn(async move {
-                let parts2: Vec<&str> = name.splitn(2, '#').collect();
-                let puuid = if parts2.len() == 2 {
-                    fetch_puuid(parts2[0], parts2[1], &client2).await.unwrap_or_default()
-                } else { String::new() };
-                if puuid.is_empty() { return (name, String::new(), String::new(), 0i64); }
-                let (tier, rank, lp) = fetch_ranked_entry(puuid, client2).await;
-                (name, tier, rank, lp)
-            })
-        }).collect();
-
-        let mut rank_map: std::collections::HashMap<String, (String, String, i64)> = std::collections::HashMap::new();
-        for h in rank_handles {
-            if let Ok((name, tier, rank, lp)) = h.await {
-                if !tier.is_empty() { rank_map.insert(name, (tier, rank, lp)); }
-            }
-        }
-        if let Some(arr) = resp["players"].as_array_mut() {
-            for p in arr.iter_mut() {
-                let name = p["summoner_name"].as_str().unwrap_or("").to_string();
-                if let Some((tier, rank, lp)) = rank_map.get(&name) {
-                    p["tier"] = json!(tier);
-                    p["rank"] = json!(rank);
-                    p["lp"]   = json!(lp);
+        // Costruiamo la mappa name→puuid da Spectator (se disponibile),
+        // così evitiamo fetch_puuid x10 e usiamo i puuid già presenti.
+        let mut puuid_map: HashMap<String, String> = HashMap::new();
+        if let Some(ref raw_spec) = spec_raw {
+            let empty = vec![];
+            for p in raw_spec["participants"].as_array().unwrap_or(&empty) {
+                let puuid   = p["puuid"].as_str().unwrap_or("").to_string();
+                let riot_id = p["riotId"].as_str().unwrap_or("").to_string();
+                let name    = p["summonerName"].as_str().unwrap_or("").to_string();
+                if !puuid.is_empty() {
+                    if !riot_id.is_empty() { puuid_map.insert(riot_id, puuid.clone()); }
+                    if !name.is_empty()    { puuid_map.insert(name,    puuid); }
                 }
             }
         }
 
-        // Arricchisce con smart data (smurf/OTP/main role) dalla Neon cache
-        // Il PUUID era già stato risolto durante il fetch del rank — lo recuperiamo di nuovo.
-        let players_snap2 = resp["players"].as_array().cloned().unwrap_or_default();
-        let smart_handles: Vec<_> = players_snap2.iter().map(|p| {
-            let name    = p["summoner_name"].as_str().unwrap_or("").to_string();
-            let client3 = client.clone();
-            tokio::spawn(async move {
-                let parts: Vec<&str> = name.splitn(2, '#').collect();
-                let puuid = if parts.len() == 2 {
-                    fetch_puuid(parts[0], parts[1], &client3).await.unwrap_or_default()
-                } else { String::new() };
-                let smart = if !puuid.is_empty() {
-                    smart_data_from_cache(&puuid).await
-                } else { None };
-                (name, smart)
-            })
-        }).collect();
-
-        let mut smart_map: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
-        for h in smart_handles {
-            if let Ok((name, Some(sd))) = h.await {
-                smart_map.insert(name, sd);
-            }
-        }
-
-        if let Some(arr) = resp["players"].as_array_mut() {
-            for p in arr.iter_mut() {
-                let name = p["summoner_name"].as_str().unwrap_or("").to_string();
-                if let Some(sd) = smart_map.get(&name) {
-                    p["summoner_level"]    = sd["summoner_level"].clone();
-                    p["main_champion"]     = sd["main_champion"].clone();
-                    p["main_role"]         = sd["main_role"].clone();
-                    p["total_games"]       = sd["total_games"].clone();
-                    p["games_on_champion"] = sd["games_on_main_champ"].clone();
+        // Se Spectator non disponibile, fallback a fetch_puuid per i player mancanti
+        {
+            let players_snap = resp["players"].as_array().cloned().unwrap_or_default();
+            let missing: Vec<String> = players_snap.iter()
+                .map(|p| p["summoner_name"].as_str().unwrap_or("").to_string())
+                .filter(|n| !n.is_empty() && !puuid_map.contains_key(n.as_str()))
+                .collect();
+            if !missing.is_empty() {
+                let resolve_handles: Vec<_> = missing.iter().map(|name| {
+                    let n = name.clone();
+                    let c = client.clone();
+                    tokio::spawn(async move {
+                        let parts: Vec<&str> = n.splitn(2, '#').collect();
+                        if parts.len() != 2 { return (n, String::new()); }
+                        let puuid = fetch_puuid(parts[0], parts[1], &c).await.unwrap_or_default();
+                        (n, puuid)
+                    })
+                }).collect();
+                for h in resolve_handles {
+                    if let Ok((name, puuid)) = h.await {
+                        if !puuid.is_empty() { puuid_map.insert(name, puuid); }
+                    }
                 }
             }
         }
-        // Indicizza i partecipanti LCD nel DB per arricchire il live search (fire-and-forget)
-        if let Some(arr) = resp["players"].as_array() {
-            db_index_live_players(arr).await;
+
+        // Ranked in parallelo per tutti i puuid noti
+        let puuid_vec: Vec<(String, String)> = puuid_map.iter()
+            .map(|(n, p)| (n.clone(), p.clone()))
+            .collect();
+        let rank_handles: Vec<_> = puuid_vec.iter().map(|(_, puuid)| {
+            let p = puuid.clone();
+            let c = client.clone();
+            tokio::spawn(async move { fetch_ranked_entry(p, c).await })
+        }).collect();
+
+        let mut rank_by_puuid: HashMap<String, (String, String, i64)> = HashMap::new();
+        for (i, h) in rank_handles.into_iter().enumerate() {
+            if let Ok(entry) = h.await {
+                rank_by_puuid.insert(puuid_vec[i].1.clone(), entry);
+            }
         }
+
+        // Aggiorna is_me, puuid, tier, rank, lp per ogni player
+        if let Some(arr) = resp["players"].as_array_mut() {
+            for p in arr.iter_mut() {
+                let name = p["summoner_name"].as_str().unwrap_or("").to_string();
+                if let Some(puuid) = puuid_map.get(&name) {
+                    p["puuid"]  = json!(puuid);
+                    p["is_me"]  = json!(!my_puuid.is_empty() && puuid.as_str() == my_puuid.as_str());
+                    if let Some((tier, rank, lp)) = rank_by_puuid.get(puuid) {
+                        p["tier"] = json!(tier);
+                        p["rank"] = json!(rank);
+                        p["lp"]   = json!(lp);
+                    }
+                }
+            }
+        }
+        // spec_handle già consumato nel join — non serve più
+        let _ = spec_raw;
+
+        // Indicizza i player in Turso (fire-and-forget)
+        index_live_players(&resp["players"]);
+
+        // Salva in cache
+        live_game_cache().await.write().await
+            .insert("self".to_string(), (std::time::Instant::now(), resp.clone()));
+
         return Ok(resp);
     }
 
-    // LCD non disponibile → aspetta Spectator
+    // Fallback: Spectator V5 (spec_raw già disponibile dal join)
     eprintln!("[LiveGame] LCD non disponibile, uso Spectator V5");
-    match spec_handle.await.unwrap_or(None) {
+    match spec_raw {
         None      => Ok(json!({ "in_game": false, "game_time": 0, "queue_type": "", "players": [] })),
-        Some(raw) => Ok(build_live_game_response(&raw, &my_puuid, &client).await),
+        Some(raw) => {
+            let resp = build_live_game_response(&raw, &my_puuid, &client).await;
+            index_live_players(&resp["players"]);
+            live_game_cache().await.write().await
+                .insert("self".to_string(), (std::time::Instant::now(), resp.clone()));
+            Ok(resp)
+        }
     }
 }
 
-/// Live Game per qualsiasi summoner (dalla tab profilo / ricerca).
-/// Non può usare LCD (solo per il giocatore locale), usa Spectator V5.
-/// Ritenta fino a 2 volte in caso di errore transitorio (429, 5xx).
+/// Live game per un summoner specifico (ricerca profilo altrui) — solo Spectator V5.
 #[tauri::command]
 async fn check_live_game(puuid: String) -> Result<Value, String> {
-    eprintln!("[check_live_game] Checking puuid={}", &puuid[..puuid.len().min(20)]);
+    // Cache hit per puuid — invalida se ranked incompleti
+    if !puuid.is_empty() {
+        let cache = live_game_cache().await.read().await;
+        if let Some((ts, cached)) = cache.get(&puuid) {
+            if ts.elapsed() < std::time::Duration::from_secs(25) {
+                let players = cached["players"].as_array().map(|a| a.len()).unwrap_or(0);
+                let ranked_count = cached["players"].as_array().map(|a|
+                    a.iter().filter(|p| !p["tier"].as_str().unwrap_or("").is_empty()).count()
+                ).unwrap_or(0);
+                let queue = cached["queue_type"].as_str().unwrap_or("");
+                let is_ranked = queue.contains("Ranked");
+                if !is_ranked || players == 0 || ranked_count * 2 >= players {
+                    return Ok(cached.clone());
+                }
+            }
+        }
+    }
+    eprintln!("[check_live_game] puuid={:.20}", &puuid);
     if puuid.is_empty() {
         return Ok(json!({ "in_game": false, "game_time": 0, "queue_type": "", "players": [] }));
     }
     let client = Client::builder()
         .danger_accept_invalid_certs(true)
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
         .build().unwrap();
 
-    // Retry su errori transitori (429 rate limit, 5xx server error)
-    for attempt in 0..3u32 {
-        match fetch_spectator(&puuid, &client).await {
-            None => {
-                // 404 = non in partita, 403 = forbidden → no retry
-                eprintln!("[check_live_game] fetch_spectator None (attempt {})", attempt);
-                return Ok(json!({ "in_game": false, "game_time": 0, "queue_type": "", "players": [] }));
+    match fetch_spectator(&puuid, &client).await {
+        None      => Ok(json!({ "in_game": false, "game_time": 0, "queue_type": "", "players": [] })),
+        Some(raw) => {
+            let resp = build_live_game_response(&raw, &puuid, &client).await;
+            index_live_players(&resp["players"]);
+            if !puuid.is_empty() {
+                live_game_cache().await.write().await
+                    .insert(puuid, (std::time::Instant::now(), resp.clone()));
             }
-            Some(raw) => {
-                eprintln!("[check_live_game] Partita trovata (attempt {}), building response...", attempt);
-                let resp = build_live_game_response(&raw, &puuid, &client).await;
-                return Ok(resp);
+            Ok(resp)
+        }
+    }
+}
+
+/// Recupera le maestrie del summoner — cache in-memory TTL 10 minuti.
+#[tauri::command]
+async fn get_summoner_masteries(puuid: String) -> Result<Value, String> {
+    {
+        let cache = masteries_cache().await.read().await;
+        if let Some((ts, cached)) = cache.get(&puuid) {
+            if ts.elapsed() < std::time::Duration::from_secs(600) {
+                return Ok(cached.clone());
             }
         }
     }
-    Ok(json!({ "in_game": false, "game_time": 0, "queue_type": "", "players": [] }))
-}
 
-
-/// Recupera le maestrie del summoner tramite Riot API.
-/// Accetta sia il puuid diretto che game_name+tag_line (separati da '#').
-#[tauri::command]
-async fn get_summoner_masteries(puuid: String) -> Result<Value, String> {
     let client = Client::builder()
         .danger_accept_invalid_certs(true)
         .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .unwrap();
+        .build().unwrap();
 
     let url = format!(
         "https://euw1.api.riotgames.com/lol/champion-mastery/v4/champion-masteries/by-puuid/{}/top?count=20",
         puuid
     );
-
-    let res = client
-        .get(&url)
-        .header("X-Riot-Token", riot_api_key())
-        .send().await
-        .map_err(|e| e.to_string())?;
+    let res = client.get(&url).header("X-Riot-Token", riot_api_key())
+        .send().await.map_err(|e| e.to_string())?;
 
     let status = res.status().as_u16();
     if status == 404 { return Ok(json!([])); }
-    if status != 200 {
-        return Err(format!("Riot API errore {}", status));
-    }
+    if status != 200 { return Err(format!("Riot API errore {}", status)); }
 
     let masteries: Value = res.json().await.map_err(|_| "Errore JSON masteries")?;
+    masteries_cache().await.write().await
+        .insert(puuid, (std::time::Instant::now(), masteries.clone()));
     Ok(masteries)
 }
 
-/// Recupera la timeline di un match per mostrare gli acquisti item per minuto.
+/// Timeline di un match per gli acquisti item per minuto.
 #[tauri::command]
 async fn get_match_timeline(match_id: String) -> Result<Value, String> {
     let client = Client::builder()
         .danger_accept_invalid_certs(true)
         .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .unwrap();
+        .build().unwrap();
 
     let url = format!(
         "https://europe.api.riotgames.com/lol/match/v5/matches/{}/timeline",
         match_id
     );
-
     for attempt in 0..3u32 {
-        let res = client
-            .get(&url)
-            .header("X-Riot-Token", riot_api_key())
-            .send().await
-            .map_err(|e| e.to_string())?;
-
+        let res = client.get(&url).header("X-Riot-Token", riot_api_key())
+            .send().await.map_err(|e| e.to_string())?;
         let status = res.status().as_u16();
         if status == 429 {
-            let wait = 2000 * (attempt + 1) as u64;
-            tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(2000 * (attempt + 1) as u64)).await;
             continue;
         }
-        if status != 200 {
-            return Err(format!("Riot API timeline error {}", status));
-        }
-        let data: Value = res.json().await.map_err(|_| "Errore JSON timeline")?;
-        return Ok(data);
+        if status != 200 { return Err(format!("Riot API timeline error {}", status)); }
+        return res.json().await.map_err(|_| "Errore JSON timeline".into());
     }
     Err("Timeline fetch fallita dopo 3 tentativi".into())
 }
 
-/// Suggerimenti di ricerca: cerca nella Neon cache per nome/tag parziale (ILIKE).
-/// Ritorna fino a 6 summoner che matchano la query, con profilo e rank per il dropdownn.
+/// Suggerisce summoner per l'autocomplete a partire da quelli già cercati/visti.
+/// Legge dalla summoner_cache Turso (solo metadati, no matches).
+/// Restituisce fino a 6 risultati con icona, livello e rank per il dropdown.
 #[tauri::command]
 async fn search_summoner_suggestions(query: String) -> Result<Value, String> {
     let q = query.trim().to_string();
-    if q.len() < 2 {
-        return Ok(json!([]));
-    }
+    if q.len() < 2 { return Ok(json!([])); }
 
-    let pool = match get_pool().await {
-        Some(p) => p,
-        None    => return Ok(json!([])),
-    };
-    let pg = pool.get().await.map_err(|e| e.to_string())?;
-
-    // Supporta sia "Nome#TAG" che solo "Nome" (senza #)
     let (name_q, tag_q) = if q.contains('#') {
-        let parts: Vec<&str> = q.splitn(2, '#').collect();
-        (parts[0].to_string(), Some(parts[1].to_string()))
+        let mut parts = q.splitn(2, '#');
+        (parts.next().unwrap_or("").to_string(), Some(parts.next().unwrap_or("").to_string()))
     } else {
         (q.clone(), None)
     };
 
     let rows = if let Some(tag) = tag_q {
-        // Ricerca precisa nome + tag parziale
-        pg.query(
-            "SELECT game_name, tag_line, profile, ranked_entries \
-             FROM summoner_cache \
-             WHERE LOWER(game_name) ILIKE $1 AND LOWER(tag_line) ILIKE $2 \
+        turso_query(
+            "SELECT game_name, tag_line, profile, solo_tier, solo_rank, solo_lp
+             FROM summoner_cache
+             WHERE LOWER(game_name) LIKE ?1 AND LOWER(tag_line) LIKE ?2
              ORDER BY cached_at DESC LIMIT 6",
-            &[
-                &format!("{}%", name_q.to_lowercase()),
-                &format!("{}%", tag.to_lowercase()),
+            vec![
+                json!(format!("{}%", name_q.to_lowercase())),
+                json!(format!("{}%", tag.to_lowercase())),
             ],
         ).await.unwrap_or_default()
     } else {
-        // Ricerca solo per nome (prefisso o contenuto)
-        pg.query(
-            "SELECT game_name, tag_line, profile, ranked_entries \
-             FROM summoner_cache \
-             WHERE LOWER(game_name) ILIKE $1 \
+        turso_query(
+            "SELECT game_name, tag_line, profile, solo_tier, solo_rank, solo_lp
+             FROM summoner_cache
+             WHERE LOWER(game_name) LIKE ?1
              ORDER BY cached_at DESC LIMIT 6",
-            &[&format!("%{}%", name_q.to_lowercase())],
+            vec![json!(format!("%{}%", name_q.to_lowercase()))],
         ).await.unwrap_or_default()
     };
 
-    let suggestions: Vec<Value> = rows.iter().map(|row: &tokio_postgres::Row| {
-        let game_name: String = row.get(0);
-        let tag_line:  String = row.get(1);
-        let profile:   Value  = row.get::<_, serde_json::Value>(2);
-        let ranked:    Value  = row.get::<_, serde_json::Value>(3);
-
-        let profile_icon_id = profile["profileIconId"].as_i64();
-        let summoner_level  = profile["summonerLevel"].as_i64();
-
-        // Estrai SoloQ rank
-        let solo = ranked.as_array()
-            .and_then(|a| a.iter().find(|e| e["queueType"].as_str() == Some("RANKED_SOLO_5x5")));
-        let tier = solo.and_then(|e| e["tier"].as_str()).unwrap_or("").to_string();
-        let rank = solo.and_then(|e| e["rank"].as_str()
-            .or_else(|| e["division"].as_str())).unwrap_or("").to_string();
-        let lp   = solo.and_then(|e| e["leaguePoints"].as_i64()).unwrap_or(0);
-
-        json!({
-            "name": game_name,
-            "tag":  tag_line,
-            "profileIconId": profile_icon_id,
-            "summonerLevel": summoner_level,
-            "tier": tier,
-            "rank": rank,
-            "lp":   lp,
-        })
+    let suggestions: Vec<Value> = rows.iter().filter_map(|row| {
+        let mut iter = row.iter();
+        let game_name = iter.next()?.as_str()?.to_string();
+        let tag_line  = iter.next()?.as_str()?.to_string();
+        let profile: Value = serde_json::from_str(iter.next()?.as_str()?).ok()?;
+        let tier = iter.next()?.as_str().unwrap_or("").to_string();
+        let rank = iter.next()?.as_str().unwrap_or("").to_string();
+        let lp   = iter.next()?.as_i64().unwrap_or(0);
+        Some(json!({
+            "name":          game_name,
+            "tag":           tag_line,
+            "profileIconId": profile["profileIconId"],
+            "summonerLevel": profile["summonerLevel"],
+            "tier":          tier,
+            "rank":          rank,
+            "lp":            lp,
+        }))
     }).collect();
 
     Ok(json!(suggestions))
 }
 
 fn main() {
-
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![
-            get_profiles, get_more_matches, search_summoner, get_opgg_data,
-            get_champ_select_session, auto_import_build, list_opgg_tools,
-            debug_champ_select_slot, get_tier_list, get_opgg_matches, get_rlp_matches,
-            get_live_game, check_live_game, get_summoner_masteries, get_match_timeline,
-            search_summoner_suggestions
+            get_profiles,
+            get_more_matches,
+            search_summoner,
+            get_tier_list,
+            get_live_game,
+            check_live_game,
+            get_summoner_masteries,
+            get_match_timeline,
+            search_summoner_suggestions,
+            get_champ_select_session,
+            auto_import_build,
+            apply_rune_page,
+            debug_champ_select_slot,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

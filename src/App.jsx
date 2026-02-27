@@ -22,6 +22,26 @@ export default function App() {
     const [updateStatus, setUpdateStatus] = useState("idle");
     const [updateProgress, setUpdateProgress] = useState(0);
     const updateRef = useRef(null);
+
+    // ── DEV: fake update trigger (console: window.__fakeUpdate()) ────────────
+    useEffect(() => {
+        window.__fakeUpdate = (version = "9.9.9", body = "Fake update per test UI") => {
+            setUpdateInfo({ version, body });
+            setUpdateStatus("available");
+        };
+        window.__fakeDownload = async () => {
+            setUpdateStatus("downloading");
+            setUpdateProgress(0);
+            for (let i = 0; i <= 100; i += 5) {
+                await new Promise(r => setTimeout(r, 80));
+                setUpdateProgress(i);
+            }
+            setUpdateStatus("done");
+        };
+        return () => { delete window.__fakeUpdate; delete window.__fakeDownload; };
+    }, []);
+    // ────────────────────────────────────────────────────────────────────────
+
     const [profileData, setProfileData] = useState(null);
     const [error, setError] = useState(null);
     const [loading, setLoading] = useState(true);
@@ -149,7 +169,6 @@ export default function App() {
     const liveGamePuuidRef = useRef(null);
     const [isInLiveGame, setIsInLiveGame] = useState(false); // profilo attivo in partita live?
     const champSelectPollRef = useRef(null);
-    const liveGamePollRef = useRef(null);
     const wasInChampSelect = useRef(false);
 
     // Redirect away from champ-select tab if it shouldn't be visible
@@ -177,7 +196,7 @@ export default function App() {
                 setIsInChampSelect(false);
             }
         }
-        champSelectPollRef.current = setInterval(checkChampSelect, 3000);
+        champSelectPollRef.current = setInterval(checkChampSelect, 5000); // ridotto da 3s: champ-select-tab fa il suo poll a 2.5s
         checkChampSelect();
         return () => clearInterval(champSelectPollRef.current);
     }, []);
@@ -194,24 +213,8 @@ export default function App() {
         }
     }, [searchData?.puuid, profileData?.puuid, activeTab]);
 
-    // Poll live game status per mostrare indicatore visivo su tab e pulsante
-    useEffect(() => {
-        async function checkLiveGame() {
-            const activePuuid = searchData?.puuid ?? profileData?.puuid ?? null;
-            if (!activePuuid) { setIsInLiveGame(false); return; }
-            try {
-                const res = await invoke("check_live_game", { puuid: activePuuid });
-                setIsInLiveGame(res?.in_game === true);
-            } catch {
-                setIsInLiveGame(false);
-            }
-        }
-        clearInterval(liveGamePollRef.current);
-        checkLiveGame();
-        liveGamePollRef.current = setInterval(checkLiveGame, 30000);
-        return () => clearInterval(liveGamePollRef.current);
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [profileData?.puuid, searchData?.puuid]);
+    // isInLiveGame viene aggiornato via callback onStatusChange da LiveGameTab
+    // (che già fa il suo poll ogni 30s) — nessun poll duplicato qui.
 
     // Gestisce sia il formato Riot API (matchDetail + puuid) che il formato RLP (oggetto già normalizzato)
     function extractPlayerData(matchDetail, puuid) {
@@ -391,12 +394,16 @@ export default function App() {
         async function checkForUpdates() {
             try {
                 const update = await check();
-                if (update?.available) {
+                // Debug: logga sempre le versioni per diagnosticare falsi positivi
+                console.log(
+                    `[Updater] currentVersion: ${update?.currentVersion} | latestVersion: ${update?.version} | available: ${update?.available}`
+                );
+                if (update?.available && update.version !== update.currentVersion) {
                     updateRef.current = update;
                     setUpdateInfo({ version: update.version, body: update.body ?? "" });
                     setUpdateStatus("available");
                 } else {
-                    console.log("[Updater] Nessun aggiornamento disponibile. Versione attuale:", update);
+                    console.log("[Updater] Nessun aggiornamento disponibile.");
                 }
             } catch (e) {
                 console.error("[Updater] Errore:", e);
@@ -406,7 +413,11 @@ export default function App() {
     }, []);
 
     async function handleUpdate() {
-        if (!updateRef.current) return;
+        // Se è un fake update (nessun ref reale), simula il download
+        if (!updateRef.current) {
+            await window.__fakeDownload?.();
+            return;
+        }
         setUpdateStatus("downloading");
         setUpdateProgress(0);
         try {
@@ -537,21 +548,50 @@ export default function App() {
 
     async function handleSearch(e) {
         if (e.key !== "Enter" && e.type !== "click") return;
-        const parts = searchQuery.trim().split("#");
-        if (parts.length !== 2 || !parts[0] || !parts[1]) {
-            console.warn("[RLP] Formato non valido: NomeSummoner#TAG");
+        // Normalizza l'input: decodifica "+" come spazio (formato URL da LoG/op.gg)
+        // e supporta sia "Nome#TAG" che "Nome-TAG" (formato leagueofgraphs)
+        const raw = searchQuery.trim().replace(/\+/g, " ");
+        let gameName, tagLine;
+        if (raw.includes("#")) {
+            // Formato standard: "Lucid Dreams#RAGO"
+            const idx = raw.indexOf("#");
+            gameName = raw.slice(0, idx);
+            tagLine = raw.slice(idx + 1);
+        } else {
+            // Formato LoG: "Lucid Dreams-RAGO" — split sull'ultimo "-"
+            const idx = raw.lastIndexOf("-");
+            if (idx === -1) {
+                console.warn("[RLP] Formato non valido: usa NomeSummoner#TAG");
+                return;
+            }
+            gameName = raw.slice(0, idx);
+            tagLine = raw.slice(idx + 1);
+        }
+        if (!gameName || !tagLine) {
+            console.warn("[RLP] Formato non valido: usa NomeSummoner#TAG");
             return;
         }
         setActiveTab("profile");
-        await doSearch(parts[0], parts[1]);
+        await doSearch(gameName, tagLine);
     }
 
     async function handlePlayerClick(summonerId) {
-        const parts = summonerId.trim().split("#");
-        if (parts.length !== 2 || !parts[0] || !parts[1]) return;
-        setSearchQuery(summonerId);
+        const raw = summonerId.trim().replace(/\+/g, " ");
+        let gameName, tagLine;
+        if (raw.includes("#")) {
+            const idx = raw.indexOf("#");
+            gameName = raw.slice(0, idx);
+            tagLine = raw.slice(idx + 1);
+        } else {
+            const idx = raw.lastIndexOf("-");
+            if (idx === -1) return;
+            gameName = raw.slice(0, idx);
+            tagLine = raw.slice(idx + 1);
+        }
+        if (!gameName || !tagLine) return;
+        setSearchQuery(`${gameName}#${tagLine}`);
         setActiveTab("profile");
-        await doSearch(parts[0], parts[1]);
+        await doSearch(gameName, tagLine);
     }
 
     function handleViewLiveGame(puuid) {
@@ -963,7 +1003,7 @@ export default function App() {
                     </TabsContent>
 
                     <TabsContent value="live-game">
-                        <LiveGameTab puuidOverride={liveGamePuuid} myPuuid={myPuuid} />
+                        <LiveGameTab puuidOverride={liveGamePuuid} myPuuid={myPuuid} onStatusChange={setIsInLiveGame} />
                     </TabsContent>
 
                 </Tabs>
