@@ -1,6 +1,6 @@
 import { Card } from "./ui/card";
 import { Clock, TrendingUp, ChevronDown, ChevronUp, ShoppingCart } from "lucide-react";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { PATCH } from "./constants";
 import { resolveMe } from "./utils";
@@ -216,7 +216,7 @@ function TimelinePanel({ matchId, myPuuid }) {
     }
 
     // Carica automaticamente al mount
-    useState(() => { load(); }, []);
+    useEffect(() => { load(); }, []);
 
     if (loading) return (
         <div className="text-xs text-[#3a6080] animate-pulse py-2">Loading timeline...</div>
