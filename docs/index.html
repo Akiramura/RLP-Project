@@ -992,8 +992,8 @@
                     <li><strong>Data Dragon CDN</strong> (<code>ddragon.leagueoflegends.com</code>) — Champion and spell images are loaded directly from Riot's official CDN. No personal data is transmitted.</li>
                 </ul>
 
-                <h3>5. Server-Side Cache (Neon PostgreSQL)</h3>
-                <p>To reduce redundant API calls and improve load times, the App uses a serverless PostgreSQL database hosted on <a href="https://neon.tech" target="_blank">Neon</a> as a temporary cache. This cache stores only data that is already publicly accessible via the Riot Games API:</p>
+                <h3>5. Server-Side Cache (Turso)</h3>
+                <p>To reduce redundant API calls and improve load times, the App uses a serverless SQLite database hosted on <a href="https://turso.tech" target="_blank">Turso</a> as a temporary cache. This cache stores only data that is already publicly accessible via the Riot Games API:</p>
                 <ul>
                     <li><strong>Summoner cache</strong> — PUUID, Riot ID (game name + tag), summoner profile, ranked entries, and match history. This data is considered stale and refreshed after <strong>60 minutes</strong>.</li>
                     <li><strong>Match cache</strong> — Individual match details (participants, items, KDA, game duration) indexed by match ID. Match results do not change, so this data is cached without a TTL to avoid redundant Riot API calls.</li>
@@ -1004,7 +1004,7 @@
                 <ul>
                     <li><strong>Riot Games</strong> — <a href="https://www.riotgames.com/en/privacy-notice" target="_blank">Riot Games Privacy Notice</a></li>
                     <li><strong>OP.GG</strong> — <a href="https://op.gg/policy/privacy" target="_blank">OP.GG Privacy Policy</a></li>
-                    <li><strong>Neon</strong> — <a href="https://neon.tech/privacy-policy" target="_blank">Neon Privacy Policy</a></li>
+                    <li><strong>Turso</strong> — <a href="https://turso.tech/privacy-policy" target="_blank">Turso Privacy Policy</a></li>
                 </ul>
 
                 <h3>7. Children's Privacy</h3>
