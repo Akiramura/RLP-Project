@@ -1,9 +1,10 @@
+import { createPortal } from "react-dom";
 import { Download, X, RefreshCw, CheckCircle2 } from "lucide-react";
 
 export function UpdateBanner({ status, info, progress, onUpdate, onDismiss }) {
     if (status === "idle") return null;
 
-    return (
+    return createPortal(
         <div className="fixed inset-0 z-[9999] pointer-events-none">
 
             {/* Backdrop */}
@@ -141,6 +142,7 @@ export function UpdateBanner({ status, info, progress, onUpdate, onDismiss }) {
 
                 </div>
             </div>
-        </div>
+        </div>,
+        document.body
     );
 }

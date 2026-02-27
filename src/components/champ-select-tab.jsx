@@ -246,7 +246,8 @@ export function ChampSelectTab() {
     const [status, setStatus] = useState(STATUS.IDLE);
     const [champData, setChampData] = useState(null);
     const [importResult, setImportResult] = useState(null);
-    const [runeTab, setRuneTab] = useState("opgg");
+    const [runeTab, setRuneTab] = useState("opgg"); // solo tab OP.GG attivo
+    // const [runeTab, setRuneTab] = useState("opgg"); // "opgg" | "db"
     const pollRef = useRef(null);
     const importingRef = useRef(false);
     const lastChampRef = useRef(null);
@@ -292,7 +293,7 @@ export function ChampSelectTab() {
         if (importingRef.current) return;
         importingRef.current = true;
         setImportResult(null);
-        setRuneTab("opgg");
+        setRuneTab("opgg"); // reset al tab OP.GG (unico attivo)
         try {
             setStatus(STATUS.FETCHING);
             const result = await invoke("auto_import_build", {
@@ -316,22 +317,23 @@ export function ChampSelectTab() {
     async function applyRunes(tab) {
         const runeData = tab === "opgg"
             ? importResult?.opgg_runes
-            : (hasDbBuild ? {
-                champion_name: champData?.champion_name ?? "",
-                primary_path_id: importResult.db_build.primary_path_id,
-                primary_path_name: importResult.db_build.primary_path_name,
-                // [keystone, slot1, slot2, slot3] — il backend padda con 0 gli slot mancanti
-                primary_rune_ids: [
-                    importResult.db_build.keystone_id,
-                    ...(importResult.db_build.primary_slot_ids ?? [])
-                ],
-                secondary_path_id: importResult.db_build.secondary_path_id,
-                secondary_path_name: importResult.db_build.secondary_path_name,
-                secondary_rune_ids: importResult.db_build.secondary_rune_ids ?? [],
-                stat_mod_ids: importResult?.opgg_runes?.stat_mod_ids?.length >= 3
-                    ? importResult.opgg_runes.stat_mod_ids
-                    : [5008, 5008, 5002],
-            } : null);
+            // : (hasDbBuild ? {
+            //     champion_name: champData?.champion_name ?? "",
+            //     primary_path_id: importResult.db_build.primary_path_id,
+            //     primary_path_name: importResult.db_build.primary_path_name,
+            //     // [keystone, slot1, slot2, slot3] — il backend padda con 0 gli slot mancanti
+            //     primary_rune_ids: [
+            //         importResult.db_build.keystone_id,
+            //         ...(importResult.db_build.primary_slot_ids ?? [])
+            //     ],
+            //     secondary_path_id: importResult.db_build.secondary_path_id,
+            //     secondary_path_name: importResult.db_build.secondary_path_name,
+            //     secondary_rune_ids: importResult.db_build.secondary_rune_ids ?? [],
+            //     stat_mod_ids: importResult?.opgg_runes?.stat_mod_ids?.length >= 3
+            //         ? importResult.opgg_runes.stat_mod_ids
+            //         : [5008, 5008, 5002],
+            // } : null);
+            : null;
 
         if (!runeData) return;
         setApplyingRunes(true);
@@ -353,28 +355,29 @@ export function ChampSelectTab() {
     };
     const isError = (s) => status === STATUS.ERROR && s === STATUS.IMPORTING;
 
-    const hasDbBuild = !!importResult?.db_build;
+    const hasDbBuild = false; // !!importResult?.db_build;
 
     // Shape DB rune data to match RuneDisplay interface
-    const dbRuneData = hasDbBuild ? {
-        champion_name: champData?.champion_name ?? "",
-        primary_path_id: importResult.db_build.primary_path_id,
-        primary_path_name: importResult.db_build.primary_path_name,
-        // Ricostruisce primary_rune_ids = [keystone, slot1, slot2, slot3]
-        // Gli 0 indicano slot senza dati sufficienti nel DB (verranno mostrati come placeholder)
-        primary_rune_ids: [
-            importResult.db_build.keystone_id,
-            ...(importResult.db_build.primary_slot_ids ?? [0, 0, 0])
-        ],
-        secondary_path_id: importResult.db_build.secondary_path_id,
-        secondary_path_name: importResult.db_build.secondary_path_name,
-        secondary_rune_ids: importResult.db_build.secondary_rune_ids ?? [],
-        // Default frammenti: Adaptive Force, Adaptive Force, Armor (stesso default del backend)
-        // Frammenti: presi da OP.GG se disponibili, altrimenti default Adaptive/Adaptive/Armor
-        stat_mod_ids: importResult?.opgg_runes?.stat_mod_ids?.length >= 3
-            ? importResult.opgg_runes.stat_mod_ids
-            : [5008, 5008, 5002],
-    } : null;
+    // const dbRuneData = hasDbBuild ? {
+    //     champion_name: champData?.champion_name ?? "",
+    //     primary_path_id: importResult.db_build.primary_path_id,
+    //     primary_path_name: importResult.db_build.primary_path_name,
+    //     // Ricostruisce primary_rune_ids = [keystone, slot1, slot2, slot3]
+    //     // Gli 0 indicano slot senza dati sufficienti nel DB (verranno mostrati come placeholder)
+    //     primary_rune_ids: [
+    //         importResult.db_build.keystone_id,
+    //         ...(importResult.db_build.primary_slot_ids ?? [0, 0, 0])
+    //     ],
+    //     secondary_path_id: importResult.db_build.secondary_path_id,
+    //     secondary_path_name: importResult.db_build.secondary_path_name,
+    //     secondary_rune_ids: importResult.db_build.secondary_rune_ids ?? [],
+    //     // Default frammenti: Adaptive Force, Adaptive Force, Armor (stesso default del backend)
+    //     // Frammenti: presi da OP.GG se disponibili, altrimenti default Adaptive/Adaptive/Armor
+    //     stat_mod_ids: importResult?.opgg_runes?.stat_mod_ids?.length >= 3
+    //         ? importResult.opgg_runes.stat_mod_ids
+    //         : [5008, 5008, 5002],
+    // } : null;
+    const dbRuneData = null;
 
     const activeRuneData = runeTab === "opgg" ? importResult?.opgg_runes : dbRuneData;
     const accentColor = RUNE_PATH_COLORS[Number(activeRuneData?.primary_path_id)] ?? "#4fc3f7";
@@ -485,14 +488,14 @@ export function ChampSelectTab() {
                                         : <>✗ OP.GG non importato</>
                                     }
                                 </p>
-                                {hasDbBuild && (
+                                {/* {hasDbBuild && (
                                     <p className={`text-sm flex items-center gap-1.5 ${importResult.db_build.items_imported ? "text-purple-400" : "text-[#5a5080]"}`}>
                                         {importResult.db_build.items_imported
                                             ? <><Database className="w-3.5 h-3.5" /> Dataset DB importato</>
                                             : <><Database className="w-3.5 h-3.5 opacity-50" /> DB non disponibile</>
                                         }
                                     </p>
-                                )}
+                                )} */}
                             </div>
                         </Card>
                     </div>
@@ -513,6 +516,7 @@ export function ChampSelectTab() {
                                 OP.GG
                             </button>
 
+                            {/* Tab DB disabilitato — db_build commentato
                             <button
                                 onClick={() => { if (hasDbBuild) { setRuneTab("db"); applyRunes("db"); } }}
                                 className={`flex items-center gap-2 px-5 py-3.5 text-sm font-semibold transition-all border-b-2 -mb-px focus:outline-none
@@ -530,6 +534,7 @@ export function ChampSelectTab() {
                                     </span>
                                 )}
                             </button>
+                            */}
                         </div>
 
                         {/* Content */}
@@ -574,6 +579,7 @@ export function ChampSelectTab() {
                                                 Importata nel client ✓
                                             </span>
                                         ) : (
+                                            // Tab DB disabilitato
                                             <span className="text-xs text-green-300 bg-green-900/30 border border-green-700/50 rounded px-2 py-1">
                                                 Applicata nel client ✓
                                             </span>
@@ -587,12 +593,14 @@ export function ChampSelectTab() {
                             {!activeRuneData && runeTab === "opgg" && (
                                 <p className="text-[#3a6080] text-sm py-4">Rune OP.GG non disponibili.</p>
                             )}
+                            {/* Tab DB disabilitato
                             {!activeRuneData && runeTab === "db" && (
                                 <div className="py-4 text-center">
                                     <p className="text-[#3a6080] text-sm">Nessun dato per questo campione/lane.</p>
                                     <p className="text-[#2a5060] text-xs mt-1">Sample insufficiente (min. 5 partite).</p>
                                 </div>
                             )}
+                            */}
                         </div>
                     </Card>
                 </>

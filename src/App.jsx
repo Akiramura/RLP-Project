@@ -22,6 +22,26 @@ export default function App() {
     const [updateStatus, setUpdateStatus] = useState("idle");
     const [updateProgress, setUpdateProgress] = useState(0);
     const updateRef = useRef(null);
+
+    // ── DEV: fake update trigger (console: window.__fakeUpdate()) ────────────
+    useEffect(() => {
+        window.__fakeUpdate = (version = "9.9.9", body = "Fake update per test UI") => {
+            setUpdateInfo({ version, body });
+            setUpdateStatus("available");
+        };
+        window.__fakeDownload = async () => {
+            setUpdateStatus("downloading");
+            setUpdateProgress(0);
+            for (let i = 0; i <= 100; i += 5) {
+                await new Promise(r => setTimeout(r, 80));
+                setUpdateProgress(i);
+            }
+            setUpdateStatus("done");
+        };
+        return () => { delete window.__fakeUpdate; delete window.__fakeDownload; };
+    }, []);
+    // ────────────────────────────────────────────────────────────────────────
+
     const [profileData, setProfileData] = useState(null);
     const [error, setError] = useState(null);
     const [loading, setLoading] = useState(true);
@@ -374,12 +394,16 @@ export default function App() {
         async function checkForUpdates() {
             try {
                 const update = await check();
-                if (update?.available) {
+                // Debug: logga sempre le versioni per diagnosticare falsi positivi
+                console.log(
+                    `[Updater] currentVersion: ${update?.currentVersion} | latestVersion: ${update?.version} | available: ${update?.available}`
+                );
+                if (update?.available && update.version !== update.currentVersion) {
                     updateRef.current = update;
                     setUpdateInfo({ version: update.version, body: update.body ?? "" });
                     setUpdateStatus("available");
                 } else {
-                    console.log("[Updater] Nessun aggiornamento disponibile. Versione attuale:", update);
+                    console.log("[Updater] Nessun aggiornamento disponibile.");
                 }
             } catch (e) {
                 console.error("[Updater] Errore:", e);
@@ -389,7 +413,11 @@ export default function App() {
     }, []);
 
     async function handleUpdate() {
-        if (!updateRef.current) return;
+        // Se è un fake update (nessun ref reale), simula il download
+        if (!updateRef.current) {
+            await window.__fakeDownload?.();
+            return;
+        }
         setUpdateStatus("downloading");
         setUpdateProgress(0);
         try {
