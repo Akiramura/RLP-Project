@@ -30,7 +30,7 @@ const MASTERY_COLORS = {
     5: "text-red-300",
 };
 
-export function MasteriesTab({ puuid, profile }) {
+export function MasteriesTab({ puuid, profile, region = "euw" }) {
     const [masteries, setMasteries] = useState(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState(null);
@@ -40,7 +40,7 @@ export function MasteriesTab({ puuid, profile }) {
         if (!puuid) return;
         setLoading(true);
         setError(null);
-        invoke("get_summoner_masteries", { puuid })
+        invoke("get_summoner_masteries", { puuid, region })
             .then(data => setMasteries(Array.isArray(data) ? data : []))
             .catch(e => setError(String(e)))
             .finally(() => setLoading(false));

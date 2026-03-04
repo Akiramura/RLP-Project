@@ -195,7 +195,7 @@ function TeamsPanel({ participants, myTeamId, myPuuid, mySummonerName, onPlayerC
     );
 }
 
-function TimelinePanel({ matchId, myPuuid }) {
+function TimelinePanel({ matchId, myPuuid, region = "euw" }) {
     const [timeline, setTimeline] = useState(null);
     const [loading, setLoading] = useState(false);
     const [loaded, setLoaded] = useState(false);
@@ -204,7 +204,7 @@ function TimelinePanel({ matchId, myPuuid }) {
         if (loaded) return;
         setLoading(true);
         try {
-            const data = await invoke("get_match_timeline", { matchId });
+            const data = await invoke("get_match_timeline", { matchId, region });
             setTimeline(data);
         } catch (e) {
             console.error("[Timeline]", e);
@@ -275,7 +275,7 @@ function TimelinePanel({ matchId, myPuuid }) {
     );
 }
 
-function MatchCard({ match, myPuuid, mySummonerName, onPlayerClick }) {
+function MatchCard({ match, myPuuid, mySummonerName, onPlayerClick, region = "euw" }) {
     const [open, setOpen] = useState(false);
 
     const info = match.info ?? match;
@@ -434,6 +434,7 @@ function MatchCard({ match, myPuuid, mySummonerName, onPlayerClick }) {
                         <TimelinePanel
                             matchId={match.metadata?.matchId ?? match.matchId}
                             myPuuid={myPuuid}
+                            region={region}
                         />
                     )}
                 </div>
@@ -447,7 +448,8 @@ export { resolveMe } from "./utils";
 
 const MATCHES_PER_PAGE = 10;
 
-export function MatchHistoryTab({ matches, myPuuid, mySummonerName, onPlayerClick }) {
+
+export function MatchHistoryTab({ region = "euw", matches, myPuuid, mySummonerName, onPlayerClick, onLoadMore, loadingMore = false }) {
     const [visibleCount, setVisibleCount] = useState(MATCHES_PER_PAGE);
 
     if (!matches || matches.length === 0) {
@@ -458,23 +460,69 @@ export function MatchHistoryTab({ matches, myPuuid, mySummonerName, onPlayerClic
         );
     }
 
-    const resolved = matches.map(m => resolveMe(m, myPuuid, mySummonerName));
+    // Deduplicate defensively — concurrent fetches can produce duplicates in state
+    const seenIds = new Set();
+    const uniqueMatches = matches.filter(m => {
+        const id = m?.metadata?.matchId ?? m?.matchId;
+        if (!id || seenIds.has(id)) return false;
+        seenIds.add(id);
+        return true;
+    });
+
+    // Stats aggregate solo su partite Season 2026
+    const SEASON_2026_START_MS = 1736294400000;
+    const season2026 = uniqueMatches.filter(m => {
+        const gc = m?.info?.gameCreation ?? m?.gameCreation ?? 0;
+        return gc >= SEASON_2026_START_MS;
+    });
+    const resolved = season2026.map(m => resolveMe(m, myPuuid, mySummonerName));
 
     const wins = resolved.filter(m => m.win).length;
-    const losses = matches.length - wins;
-    const wr = Math.round((wins / matches.length) * 100);
+    const losses = season2026.length - wins;
+    const wr = season2026.length > 0 ? Math.round((wins / season2026.length) * 100) : 0;
     const validKda = resolved.filter(m => m.deaths > 0);
     const avgKda = validKda.length
         ? (validKda.reduce((s, m) => s + (m.kills + m.assists) / m.deaths, 0) / validKda.length).toFixed(2)
         : "Perfect";
 
-    const visibleMatches = matches.slice(0, visibleCount);
-    const hasMore = visibleCount < matches.length;
+    const sortedMatches = [...uniqueMatches].sort((a, b) => {
+        const dateA = a.info?.gameCreation ?? a.gameCreation ?? 0;
+        const dateB = b.info?.gameCreation ?? b.gameCreation ?? 0;
+        return dateB - dateA;
+    });
+    const visibleMatches = sortedMatches.slice(0, visibleCount);
+
+    // Ci sono ancora partite da mostrare in memoria?
+    const hasMoreInMemory = visibleCount < sortedMatches.length;
+
+    // Limite 2 mesi fa — se l'ultima partita caricata è prima di questa soglia, stop
+    const twoMonthsAgoMs = Date.now() - 60 * 24 * 60 * 60 * 1000; // 60 giorni esatti
+    const oldestLoaded = sortedMatches.length > 0
+        ? Math.min(...sortedMatches.map(m => m?.info?.gameCreation ?? m?.gameCreation ?? Infinity))
+        : Infinity;
+    const hitTimeLimit = oldestLoaded < twoMonthsAgoMs;
+
+    // Possiamo fetcharne altre dalla API?
+    const canFetchMore = !!onLoadMore && !hitTimeLimit;
+
+    async function handleLoadMore() {
+        if (hasMoreInMemory) {
+            setVisibleCount(c => c + MATCHES_PER_PAGE);
+        } else if (canFetchMore && !loadingMore) {
+            const received = await onLoadMore();
+            if (received > 0) {
+                setVisibleCount(c => c + MATCHES_PER_PAGE);
+            }
+        }
+    }
+
+    const showButton = hasMoreInMemory || canFetchMore;
+    const showTimeLimit = !showButton && hitTimeLimit && sortedMatches.length > 0;
 
     return (
         <div className="space-y-3">
             <div className="flex items-center gap-5 p-3 bg-[#070f1e] rounded-xl border border-[#0f2040] text-sm flex-wrap">
-                <span className="text-[#5a8ab0]">{matches.length} partite</span>
+                <span className="text-[#5a8ab0]">{season2026.length} partite {uniqueMatches.length > season2026.length ? <span className="text-[#2a5070]"> (+{uniqueMatches.length - season2026.length} prec.)</span> : ""}</span>
                 <span>
                     <span className="text-green-400 font-semibold">{wins}V</span>
                     <span className="text-[#3a6080]"> / </span>
@@ -493,15 +541,33 @@ export function MatchHistoryTab({ matches, myPuuid, mySummonerName, onPlayerClic
                     myPuuid={myPuuid}
                     mySummonerName={mySummonerName}
                     onPlayerClick={onPlayerClick}
+                    region={region}
                 />
             ))}
 
-            {hasMore && (
+            {showTimeLimit && (
+                <div className="w-full py-2.5 rounded-xl border border-[#1a3558]/40 bg-[#070f1e] text-[#3a6080] text-sm text-center">
+                    📅 Fine cronologia — partite oltre 2 mesi non disponibili
+                </div>
+            )}
+
+            {showButton && (
                 <button
-                    onClick={() => setVisibleCount(c => c + MATCHES_PER_PAGE)}
-                    className="w-full py-2.5 rounded-xl border border-[#1a3558] bg-[#070f1e] text-[#5a8ab0] text-sm font-medium hover:bg-[#0d1f38] hover:text-[#7dd8ff] hover:border-[#244570] transition-all"
+                    onClick={handleLoadMore}
+                    disabled={loadingMore}
+                    className="w-full py-2.5 rounded-xl border border-[#1a3558] bg-[#070f1e] text-[#5a8ab0] text-sm font-medium hover:bg-[#0d1f38] hover:text-[#7dd8ff] hover:border-[#244570] transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                 >
-                    Carica altre {Math.min(MATCHES_PER_PAGE, matches.length - visibleCount)} partite
+                    {loadingMore ? (
+                        <>
+                            <svg className="w-4 h-4 animate-spin text-[#4fc3f7]" fill="none" viewBox="0 0 24 24">
+                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
+                            </svg>
+                            Caricamento...
+                        </>
+                    ) : (
+                        `Carica altre ${hasMoreInMemory ? Math.min(MATCHES_PER_PAGE, uniqueMatches.length - visibleCount) : MATCHES_PER_PAGE} partite`
+                    )}
                 </button>
             )}
         </div>

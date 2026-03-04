@@ -1,12 +1,12 @@
 import { Card } from "./ui/card";
 import { Badge } from "./ui/badge";
 import { Progress } from "./ui/progress";
-import { Trophy, Swords, Eye, Tv } from "lucide-react";
+import { Trophy, Swords, Eye, Tv, Loader2 } from "lucide-react";
 import { Button } from "./ui/button";
 import { PATCH } from "./constants";
 import { resolveMe } from "./match-history-tab";
 
-export function ProfileTab({ profile, rankedSolo, rankedFlex, matches, myPuuid, mySummonerName, onViewLiveGame, isInLiveGame }) {
+export function ProfileTab({ profile, rankedSolo, rankedFlex, matches, myPuuid, mySummonerName, onViewLiveGame, isInLiveGame, recentStats }) {
     if (!profile) return null;
 
     const level = profile.summonerLevel || 0;
@@ -226,88 +226,173 @@ export function ProfileTab({ profile, rankedSolo, rankedFlex, matches, myPuuid, 
             </div>
 
             {/* Most Played Champions — stile OP.GG */}
-            {topChampions.length > 0 && (
-                <Card className="p-6 bg-[#070f1e] border-[#1a3558]">
-                    <h3 className="text-xl font-bold text-white mb-4">Most Played Champions</h3>
+            {/*{topChampions.length > 0 && (*/}
+            {/*    <Card className="p-6 bg-[#070f1e] border-[#1a3558]">*/}
+            {/*        <h3 className="text-xl font-bold text-white mb-4">Most Played Champions</h3>*/}
+            {/*        <div className="space-y-2">*/}
+            {/*            {topChampions.map((champ, idx) => {*/}
+            {/*                const wrNum = parseFloat(champ.winRate);*/}
+            {/*                const wrColor = wrNum >= 60 ? "text-green-400" : wrNum >= 50 ? "text-[#4fc3f7]" : "text-red-400";*/}
+            {/*                const barColor = wrNum >= 60 ? "bg-green-500" : wrNum >= 50 ? "bg-[#2278ff]" : "bg-red-500";*/}
+            {/*                return (*/}
+            {/*                    <div key={champ.name} className="flex items-center gap-3 p-2 rounded-lg hover:bg-[#0d1f38]/60 transition-colors">*/}
+            {/*                        */}{/* Rank number */}
+            {/*                        <span className="text-[#2a5070] text-xs w-4 shrink-0">{idx + 1}</span>*/}
+            {/*                        */}{/* Champion icon */}
+            {/*                        <img*/}
+            {/*                            src={`https://ddragon.leagueoflegends.com/cdn/${PATCH}/img/champion/${champ.name}.png`}*/}
+            {/*                            alt={champ.name}*/}
+            {/*                            className="w-10 h-10 rounded-lg object-cover shrink-0"*/}
+            {/*                            onError={e => { e.target.style.display = "none"; }}*/}
+            {/*                        />*/}
+            {/*                        */}{/* Name + games */}
+            {/*                        <div className="w-28 shrink-0">*/}
+            {/*                            <p className="text-white font-semibold text-sm truncate">{champ.name}</p>*/}
+            {/*                            <p className="text-[#3a6080] text-xs">{champ.games} partite</p>*/}
+            {/*                        </div>*/}
+            {/*                        */}{/* WR bar */}
+            {/*                        <div className="flex-1 min-w-0">*/}
+            {/*                            <div className="flex justify-between text-xs mb-1">*/}
+            {/*                                <span className="text-[#5a8ab0]">{champ.wins}V {champ.losses}S</span>*/}
+            {/*                                <span className={`font-bold ${wrColor}`}>{champ.winRate}%</span>*/}
+            {/*                            </div>*/}
+            {/*                            <div className="h-1.5 bg-[#142545] rounded-full overflow-hidden">*/}
+            {/*                                <div className={`h-full rounded-full ${barColor}`} style={{ width: `${champ.winRate}%` }} />*/}
+            {/*                            </div>*/}
+            {/*                        </div>*/}
+            {/*                        */}{/* KDA */}
+            {/*                        <div className="text-right shrink-0 w-24">*/}
+            {/*                            <p className="text-white text-sm font-mono">*/}
+            {/*                                <span className="text-[#8ab0cc]">{champ.avgKills}</span>*/}
+            {/*                                <span className="text-[#3a6080]"> / </span>*/}
+            {/*                                <span className="text-red-400">{champ.avgDeaths}</span>*/}
+            {/*                                <span className="text-[#3a6080]"> / </span>*/}
+            {/*                                <span className="text-[#8ab0cc]">{champ.avgAssists}</span>*/}
+            {/*                            </p>*/}
+            {/*                            <p className="text-xs">*/}
+            {/*                                <span className={parseFloat(champ.kda) >= 3 || champ.kda === "Perfect" ? "text-yellow-400" : parseFloat(champ.kda) >= 2 ? "text-[#4fc3f7]" : "text-[#3a6080]"}>*/}
+            {/*                                    {champ.kda}*/}
+            {/*                                </span>*/}
+            {/*                                <span className="text-[#2a5070]"> KDA</span>*/}
+            {/*                            </p>*/}
+            {/*                        </div>*/}
+            {/*                    </div>*/}
+            {/*                );*/}
+            {/*            })}*/}
+            {/*        </div>*/}
+            {/*    </Card>*/}
+            {/*)}*/}
+
+            {/* Performance Stats */}
+            {/*{perfStats && (*/}
+            {/*    <Card className="p-6 bg-[#070f1e] border-[#1a3558]">*/}
+            {/*        <h3 className="text-xl font-bold text-white mb-4">Performance Stats</h3>*/}
+            {/*        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">*/}
+            {/*            <div className="bg-[#0d1f38] rounded-lg p-4 text-center">*/}
+            {/*                <Swords className="w-6 h-6 text-red-400 mx-auto mb-2" />*/}
+            {/*                <p className="text-2xl font-bold text-white">{perfStats.avgKills}</p>*/}
+            {/*                <p className="text-[#5a8ab0] text-xs">Avg Kills</p>*/}
+            {/*            </div>*/}
+            {/*            <div className="bg-[#0d1f38] rounded-lg p-4 text-center">*/}
+            {/*                <Eye className="w-6 h-6 text-[#5a8ab0] mx-auto mb-2" />*/}
+            {/*                <p className="text-2xl font-bold text-white">{perfStats.avgDeaths}</p>*/}
+            {/*                <p className="text-[#5a8ab0] text-xs">Avg Deaths</p>*/}
+            {/*            </div>*/}
+            {/*            <div className="bg-[#0d1f38] rounded-lg p-4 text-center">*/}
+            {/*                <Swords className="w-6 h-6 text-purple-400 mx-auto mb-2" />*/}
+            {/*                <p className="text-2xl font-bold text-white">{perfStats.avgAssists}</p>*/}
+            {/*                <p className="text-[#5a8ab0] text-xs">Avg Assists</p>*/}
+            {/*            </div>*/}
+            {/*            <div className="bg-[#0d1f38] rounded-lg p-4 text-center">*/}
+            {/*                <Trophy className="w-6 h-6 text-yellow-400 mx-auto mb-2" />*/}
+            {/*                <p className="text-2xl font-bold text-white">{perfStats.kda}</p>*/}
+            {/*                <p className="text-[#5a8ab0] text-xs">KDA Ratio</p>*/}
+            {/*            </div>*/}
+            {/*        </div>*/}
+            {/*    </Card>*/}
+            {/*)}*/}
+
+            {/* Winrate ultimi 7 giorni — fetch indipendente dalla match history */}
+            <Card className="p-6 bg-[#070f1e] border-[#1a3558]">
+                <h3 className="text-lg font-bold text-white mb-1">Winrate ultimi 7 giorni</h3>
+                <p className="text-[#3a6080] text-xs mb-4">Calcolato in tempo reale, indipendente dalla match history</p>
+                {!recentStats ? (
+                    <div className="flex items-center gap-2 text-[#3a6080] text-sm py-4">
+                        <Loader2 className="w-4 h-4 animate-spin text-[#4fc3f7]" />
+                        Caricamento in corso...
+                    </div>
+                ) : recentStats.champWr7d?.length === 0 ? (
+                    <p className="text-[#3a6080] text-sm py-4">Nessuna partita negli ultimi 7 giorni.</p>
+                ) : (
                     <div className="space-y-2">
-                        {topChampions.map((champ, idx) => {
-                            const wrNum = parseFloat(champ.winRate);
-                            const wrColor = wrNum >= 60 ? "text-green-400" : wrNum >= 50 ? "text-[#4fc3f7]" : "text-red-400";
-                            const barColor = wrNum >= 60 ? "bg-green-500" : wrNum >= 50 ? "bg-[#2278ff]" : "bg-red-500";
+                        {recentStats.champWr7d?.map(c => {
+                            const wr = c.winRate ?? 0;
                             return (
-                                <div key={champ.name} className="flex items-center gap-3 p-2 rounded-lg hover:bg-[#0d1f38]/60 transition-colors">
-                                    {/* Rank number */}
-                                    <span className="text-[#2a5070] text-xs w-4 shrink-0">{idx + 1}</span>
-                                    {/* Champion icon */}
+                                <div key={c.champion} className="flex items-center gap-3">
                                     <img
-                                        src={`https://ddragon.leagueoflegends.com/cdn/${PATCH}/img/champion/${champ.name}.png`}
-                                        alt={champ.name}
-                                        className="w-10 h-10 rounded-lg object-cover shrink-0"
+                                        src={`https://ddragon.leagueoflegends.com/cdn/${PATCH}/img/champion/${c.champion}.png`}
+                                        alt={c.champion}
+                                        className="w-8 h-8 rounded-md object-cover shrink-0"
                                         onError={e => { e.target.style.display = "none"; }}
                                     />
-                                    {/* Name + games */}
-                                    <div className="w-28 shrink-0">
-                                        <p className="text-white font-semibold text-sm truncate">{champ.name}</p>
-                                        <p className="text-[#3a6080] text-xs">{champ.games} partite</p>
+                                    <div className="w-24 shrink-0">
+                                        <p className="text-white text-sm font-semibold truncate">{c.champion}</p>
+                                        <p className="text-[#3a6080] text-xs">{c.games} {c.games === 1 ? "partita" : "partite"}</p>
                                     </div>
-                                    {/* WR bar */}
-                                    <div className="flex-1 min-w-0">
-                                        <div className="flex justify-between text-xs mb-1">
-                                            <span className="text-[#5a8ab0]">{champ.wins}V {champ.losses}S</span>
-                                            <span className={`font-bold ${wrColor}`}>{champ.winRate}%</span>
-                                        </div>
-                                        <div className="h-1.5 bg-[#142545] rounded-full overflow-hidden">
-                                            <div className={`h-full rounded-full ${barColor}`} style={{ width: `${champ.winRate}%` }} />
-                                        </div>
+                                    <div className="flex-1 flex h-5 rounded-sm overflow-hidden text-xs">
+                                        {c.wins > 0 && (
+                                            <div className="bg-[#2278ff] flex items-center justify-center text-white font-bold" style={{ width: `${(c.wins / c.games) * 100}%` }}>
+                                                {c.wins}V
+                                            </div>
+                                        )}
+                                        {c.losses > 0 && (
+                                            <div className="bg-red-500 flex items-center justify-center text-white font-bold" style={{ width: `${(c.losses / c.games) * 100}%` }}>
+                                                {c.losses}S
+                                            </div>
+                                        )}
                                     </div>
-                                    {/* KDA */}
-                                    <div className="text-right shrink-0 w-24">
-                                        <p className="text-white text-sm font-mono">
-                                            <span className="text-[#8ab0cc]">{champ.avgKills}</span>
-                                            <span className="text-[#3a6080]"> / </span>
-                                            <span className="text-red-400">{champ.avgDeaths}</span>
-                                            <span className="text-[#3a6080]"> / </span>
-                                            <span className="text-[#8ab0cc]">{champ.avgAssists}</span>
-                                        </p>
-                                        <p className="text-xs">
-                                            <span className={parseFloat(champ.kda) >= 3 || champ.kda === "Perfect" ? "text-yellow-400" : parseFloat(champ.kda) >= 2 ? "text-[#4fc3f7]" : "text-[#3a6080]"}>
-                                                {champ.kda}
-                                            </span>
-                                            <span className="text-[#2a5070]"> KDA</span>
-                                        </p>
-                                    </div>
+                                    <span className={`text-sm font-bold w-12 text-right shrink-0 ${wr >= 60 ? "text-green-400" : wr >= 50 ? "text-[#4fc3f7]" : wr > 0 ? "text-red-400" : "text-[#5a8ab0]"}`}>
+                                        {wr}%
+                                    </span>
                                 </div>
                             );
                         })}
                     </div>
-                </Card>
-            )}
+                )}
+            </Card>
 
-            {/* Performance Stats */}
-            {perfStats && (
+            {/* Giocato di recente con */}
+            {recentStats?.recentAllies?.length > 0 && (
                 <Card className="p-6 bg-[#070f1e] border-[#1a3558]">
-                    <h3 className="text-xl font-bold text-white mb-4">Performance Stats</h3>
-                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                        <div className="bg-[#0d1f38] rounded-lg p-4 text-center">
-                            <Swords className="w-6 h-6 text-red-400 mx-auto mb-2" />
-                            <p className="text-2xl font-bold text-white">{perfStats.avgKills}</p>
-                            <p className="text-[#5a8ab0] text-xs">Avg Kills</p>
-                        </div>
-                        <div className="bg-[#0d1f38] rounded-lg p-4 text-center">
-                            <Eye className="w-6 h-6 text-[#5a8ab0] mx-auto mb-2" />
-                            <p className="text-2xl font-bold text-white">{perfStats.avgDeaths}</p>
-                            <p className="text-[#5a8ab0] text-xs">Avg Deaths</p>
-                        </div>
-                        <div className="bg-[#0d1f38] rounded-lg p-4 text-center">
-                            <Swords className="w-6 h-6 text-purple-400 mx-auto mb-2" />
-                            <p className="text-2xl font-bold text-white">{perfStats.avgAssists}</p>
-                            <p className="text-[#5a8ab0] text-xs">Avg Assists</p>
-                        </div>
-                        <div className="bg-[#0d1f38] rounded-lg p-4 text-center">
-                            <Trophy className="w-6 h-6 text-yellow-400 mx-auto mb-2" />
-                            <p className="text-2xl font-bold text-white">{perfStats.kda}</p>
-                            <p className="text-[#5a8ab0] text-xs">KDA Ratio</p>
-                        </div>
+                    <h3 className="text-lg font-bold text-white mb-1">Giocato di recente con</h3>
+                    <p className="text-[#3a6080] text-xs mb-4">Compagni nelle ultime 20 partite</p>
+                    <div className="space-y-2">
+                        {recentStats.recentAllies.map(ally => {
+                            const wr = ally.winRate ?? 0;
+                            return (
+                                <div key={`${ally.name}#${ally.tag}`} className="flex items-center gap-3 p-2 rounded-lg hover:bg-[#0d1f38]/60 transition-colors">
+                                    <img
+                                        src={`https://ddragon.leagueoflegends.com/cdn/${PATCH}/img/profileicon/${ally.profileIconId ?? 1}.png`}
+                                        alt={ally.name}
+                                        className="w-9 h-9 rounded-full object-cover shrink-0 border border-[#1a3558]"
+                                        onError={e => { e.target.style.display = "none"; }}
+                                    />
+                                    <div className="flex-1 min-w-0">
+                                        <p className="text-white text-sm font-semibold truncate">
+                                            {ally.name}<span className="text-[#3a6080] text-xs"> #{ally.tag}</span>
+                                        </p>
+                                        <p className="text-[#3a6080] text-xs">{ally.games} {ally.games === 1 ? "partita" : "partite"} insieme</p>
+                                    </div>
+                                    <div className="flex gap-1 text-xs shrink-0">
+                                        {ally.wins > 0 && <span className="bg-[#2278ff] text-white px-1.5 py-0.5 rounded font-bold">{ally.wins}V</span>}
+                                        {ally.losses > 0 && <span className="bg-red-500 text-white px-1.5 py-0.5 rounded font-bold">{ally.losses}S</span>}
+                                    </div>
+                                    <span className={`text-sm font-bold w-10 text-right shrink-0 ${wr >= 60 ? "text-green-400" : wr >= 50 ? "text-[#4fc3f7]" : "text-red-400"}`}>
+                                        {wr}%
+                                    </span>
+                                </div>
+                            );
+                        })}
                     </div>
                 </Card>
             )}

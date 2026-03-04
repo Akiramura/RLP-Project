@@ -8,11 +8,10 @@ import { MatchHistoryTab } from "./components/match-history-tab";
 import { ChampionMetaTab } from "./components/champion-meta-tab";
 import { MetaTab } from "./components/meta-tab";
 import { MasteriesTab } from "./components/masteries-tab";
-import { User, History, TrendingUp, Search, BarChart2, Swords, Tv, Star, Download, X, RefreshCw, CheckCircle2 } from "lucide-react";
+import { User, History, TrendingUp, Search, BarChart2, Swords, Tv, Star, X } from "lucide-react";
 import { Input } from "./components/ui/input";
 import { Button } from "./components/ui/button";
 import "./App.css";
-
 import { ChampSelectTab } from "./components/champ-select-tab";
 import { LiveGameTab } from "./components/live-game-tab";
 import { UpdateBanner } from "./components/ui/UpdateBanner";
@@ -23,7 +22,6 @@ export default function App() {
     const [updateProgress, setUpdateProgress] = useState(0);
     const updateRef = useRef(null);
 
-    // ── DEV: fake update trigger (console: window.__fakeUpdate()) ────────────
     useEffect(() => {
         window.__fakeUpdate = (version = "9.9.9", body = "Fake update per test UI") => {
             setUpdateInfo({ version, body });
@@ -40,51 +38,74 @@ export default function App() {
         };
         return () => { delete window.__fakeUpdate; delete window.__fakeDownload; };
     }, []);
-    // ────────────────────────────────────────────────────────────────────────
 
     const [profileData, setProfileData] = useState(null);
     const [error, setError] = useState(null);
     const [loading, setLoading] = useState(true);
     const [allMatches, setAllMatches] = useState([]);
-    const [matchOffset, setMatchOffset] = useState(0);
     const [loadingMore, setLoadingMore] = useState(false);
     const matchesInitialized = useRef(false);
     const lastLoadedPuuid = useRef(null);
     const latestMatchId = useRef(null);
-    const seenMatchIds = useRef(new Set());        // dedup esterno per profilo principale
-    const seenSearchMatchIds = useRef(new Set());  // dedup esterno per search
-
-    const [seasonFetchDone, setSeasonFetchDone] = useState(false);
-    const seasonFetchRunning = useRef(false);
 
     const [searchQuery, setSearchQuery] = useState("");
     const [searchData, setSearchData] = useState(null);
     const [searching, setSearching] = useState(false);
     const [searchError, setSearchError] = useState(null);
-    const [searchSeasonFetchDone, setSearchSeasonFetchDone] = useState(false);
-    const searchSeasonFetchRunning = useRef(false);
+    const [recentStats, setRecentStats] = useState(null);
+    const [searchRecentStats, setSearchRecentStats] = useState(null);
 
-    // ── Cronologia ricerche + suggerimenti live ──────────────────────────────
     const HISTORY_KEY = "rlp_search_history";
     const MAX_HISTORY = 5;
-    // Ogni entry: { name, tag, profileIconId, tier, rank, lp }
     const [searchHistory, setSearchHistory] = useState(() => {
         try { return JSON.parse(localStorage.getItem(HISTORY_KEY) || "[]"); }
         catch { return []; }
     });
+
+    const REGION_KEY = "rlp_region";
+    const [region, setRegion] = useState(() => {
+        try { return localStorage.getItem(REGION_KEY) || "euw"; }
+        catch { return "euw"; }
+    });
+    const regionRef = useRef(region);
+    const [regionAutoDetected, setRegionAutoDetected] = useState(false);
+    // true quando l'utente ha scelto manualmente la region → blocca l'auto-detect LCU
+    const userOverrodeRegion = useRef(false);
+
+    function changeRegion(r) {
+        setRegion(r);
+        regionRef.current = r;
+        userOverrodeRegion.current = true; // l'utente ha scelto manualmente, non fare override
+        setRegionAutoDetected(false);
+        try { localStorage.setItem(REGION_KEY, r); } catch { }
+        setTimeout(() => fetchDataWithRegion(r), 0);
+    }
+
+    async function detectRegionFromLCU() {
+        // Se l'utente ha cambiato region manualmente, non sovrascrivere
+        if (userOverrodeRegion.current) return;
+        try {
+            const r = await invoke("get_client_region");
+            if (r && r !== regionRef.current) {
+                setRegion(r);
+                regionRef.current = r;
+                try { localStorage.setItem(REGION_KEY, r); } catch { }
+                setTimeout(() => fetchDataWithRegion(r), 0);
+            }
+            if (r) setRegionAutoDetected(true);
+        } catch { }
+    }
+
     const [showDropdown, setShowDropdown] = useState(false);
     const searchWrapperRef = useRef(null);
     const debounceRef = useRef(null);
-    // Suggerimenti live dalla Riot API mentre si digita (come OP.GG)
     const [liveSuggestions, setLiveSuggestions] = useState([]);
     const [loadingSuggestions, setLoadingSuggestions] = useState(false);
 
-    // Chiudi dropdown se si clicca fuori
     useEffect(() => {
         function onClickOutside(e) {
-            if (searchWrapperRef.current && !searchWrapperRef.current.contains(e.target)) {
+            if (searchWrapperRef.current && !searchWrapperRef.current.contains(e.target))
                 setShowDropdown(false);
-            }
         }
         document.addEventListener("mousedown", onClickOutside);
         return () => document.removeEventListener("mousedown", onClickOutside);
@@ -93,10 +114,7 @@ export default function App() {
     function saveHistory(entry) {
         const key = `${entry.name}#${entry.tag}`.toLowerCase();
         setSearchHistory(prev => {
-            const next = [
-                entry,
-                ...prev.filter(e => `${e.name}#${e.tag}`.toLowerCase() !== key)
-            ].slice(0, MAX_HISTORY);
+            const next = [entry, ...prev.filter(e => `${e.name}#${e.tag}`.toLowerCase() !== key)].slice(0, MAX_HISTORY);
             try { localStorage.setItem(HISTORY_KEY, JSON.stringify(next)); } catch { }
             return next;
         });
@@ -112,97 +130,61 @@ export default function App() {
         });
     }
 
-    // Filtra la cronologia in base a ciò che si sta digitando
     const filteredHistory = searchQuery.trim().length > 0
-        ? searchHistory.filter(h =>
-            `${h.name}#${h.tag}`.toLowerCase().includes(searchQuery.trim().toLowerCase())
-        )
+        ? searchHistory.filter(h => `${h.name}#${h.tag}`.toLowerCase().includes(searchQuery.trim().toLowerCase()))
         : searchHistory;
 
-    // Suggestions da mostrare: se c'è input mostra live (se disponibili) + history filtrata
-    // Se nessun input mostra solo history recenti
     const dropdownItems = searchQuery.trim().length > 0
         ? [
             ...liveSuggestions.map(s => ({ ...s, _live: true })),
-            ...filteredHistory.filter(h =>
-                !liveSuggestions.some(s => `${s.name}#${s.tag}`.toLowerCase() === `${h.name}#${h.tag}`.toLowerCase())
-            )
+            ...filteredHistory.filter(h => !liveSuggestions.some(s => `${s.name}#${s.tag}`.toLowerCase() === `${h.name}#${h.tag}`.toLowerCase()))
         ]
         : filteredHistory;
 
-    // Suggerimenti live: debounce 400ms, chiama invoke("search_summoner_suggestions") se disponibile,
-    // altrimenti usa solo la cronologia filtrata
     function onSearchInput(val) {
         setSearchQuery(val);
         setShowDropdown(true);
         clearTimeout(debounceRef.current);
-        if (!val.trim() || val.trim().length < 2) {
-            setLiveSuggestions([]);
-            return;
-        }
+        if (!val.trim() || val.trim().length < 2) { setLiveSuggestions([]); return; }
         debounceRef.current = setTimeout(async () => {
-            // Tenta di chiamare un comando Tauri per suggerimenti live
-            // Se non disponibile, usa solo la history
             try {
                 setLoadingSuggestions(true);
                 const res = await invoke("search_summoner_suggestions", { query: val.trim() });
                 if (Array.isArray(res)) setLiveSuggestions(res.slice(0, 5));
-            } catch {
-                // Comando non disponibile: nessun problema, usiamo solo history
-                setLiveSuggestions([]);
-            } finally {
-                setLoadingSuggestions(false);
-            }
+            } catch { setLiveSuggestions([]); }
+            finally { setLoadingSuggestions(false); }
         }, 400);
     }
 
-    // Stato per i match extra della search
-    const [searchMatchOffset, setSearchMatchOffset] = useState(0);
-    const [searchExtraMatches, setSearchExtraMatches] = useState([]);
     const [loadingMoreSearch, setLoadingMoreSearch] = useState(false);
-
     const [activeTab, setActiveTab] = useState("profile");
     const [isInChampSelect, setIsInChampSelect] = useState(false);
     const [liveMetaData, setLiveMetaData] = useState({});
-    const [liveGamePuuid, setLiveGamePuuid] = useState(null); // puuid del profilo attivo per LiveGameTab
-    // Ref per accedere al puuid più aggiornato dentro handleTabChange senza dipendenze
+    const [liveGamePuuid, setLiveGamePuuid] = useState(null);
     const liveGamePuuidRef = useRef(null);
-    const [isInLiveGame, setIsInLiveGame] = useState(false); // profilo attivo in partita live?
+    const [isInLiveGame, setIsInLiveGame] = useState(false);
     const champSelectPollRef = useRef(null);
     const wasInChampSelect = useRef(false);
 
-    // Redirect away from champ-select tab if it shouldn't be visible
     useEffect(() => {
-        if (activeTab === "champ-select" && (searchData || !profileData)) {
-            setActiveTab("profile");
-        }
+        if (activeTab === "champ-select" && (searchData || !profileData)) setActiveTab("profile");
     }, [searchData, profileData, activeTab]);
 
-    // Poll champ select to auto-switch tab when a game lobby starts
     useEffect(() => {
         async function checkChampSelect() {
             try {
                 const session = await invoke("get_champ_select_session");
                 const inProgress = session?.in_progress === true;
-                if (inProgress && !wasInChampSelect.current) {
-                    // Champ select just started → automatically switch to Auto Import tab
-                    setActiveTab("champ-select");
-                }
+                if (inProgress && !wasInChampSelect.current) setActiveTab("champ-select");
                 wasInChampSelect.current = inProgress;
                 setIsInChampSelect(inProgress);
-            } catch {
-                // Client not available or not in champ select, ignore silently
-                wasInChampSelect.current = false;
-                setIsInChampSelect(false);
-            }
+            } catch { wasInChampSelect.current = false; setIsInChampSelect(false); }
         }
-        champSelectPollRef.current = setInterval(checkChampSelect, 5000); // ridotto da 3s: champ-select-tab fa il suo poll a 2.5s
+        champSelectPollRef.current = setInterval(checkChampSelect, 5000);
         checkChampSelect();
         return () => clearInterval(champSelectPollRef.current);
     }, []);
 
-    // Sincronizza liveGamePuuid quando cambia il profilo attivo (es. clearSearch o nuovo profilo caricato)
-    // ma SOLO se la live-game tab è quella attiva, per non disturbare le altre tab
     useEffect(() => {
         if (activeTab === "live-game") {
             const activePuuid = searchData?.puuid ?? profileData?.puuid ?? null;
@@ -213,167 +195,88 @@ export default function App() {
         }
     }, [searchData?.puuid, profileData?.puuid, activeTab]);
 
-    // isInLiveGame viene aggiornato via callback onStatusChange da LiveGameTab
-    // (che già fa il suo poll ogni 30s) — nessun poll duplicato qui.
-
-    // Gestisce sia il formato Riot API (matchDetail + puuid) che il formato RLP (oggetto già normalizzato)
-    function extractPlayerData(matchDetail, puuid) {
-        // Formato RLP: già normalizzato da get_rlp_matches, ha championName direttamente
-        if (matchDetail?.championName !== undefined && matchDetail?.kills !== undefined) {
-            return matchDetail;
-        }
-        // Formato Riot API: ha info.participants[]
-        const info = matchDetail?.info;
-        if (!info) return null;
-        const participant = info.participants?.find(p => p.puuid === puuid);
-        if (!participant) return null;
-        return {
-            matchId: matchDetail.metadata?.matchId,
-            win: participant.win,
-            championName: participant.championName,
-            champLevel: participant.champLevel,
-            kills: participant.kills,
-            deaths: participant.deaths,
-            assists: participant.assists,
-            totalMinionsKilled: (participant.totalMinionsKilled || 0) + (participant.neutralMinionsKilled || 0),
-            gameDuration: info.gameDuration,
-            items: [participant.item0, participant.item1, participant.item2,
-            participant.item3, participant.item4, participant.item5, participant.item6],
-            item0: participant.item0, item1: participant.item1, item2: participant.item2,
-            item3: participant.item3, item4: participant.item4, item5: participant.item5, item6: participant.item6,
-            visionScore: participant.visionScore,
-            goldEarned: participant.goldEarned,
-            queueLabel: info.gameMode,
-            gameCreation: info.gameCreation,
-        };
-    }
-
     const SEASON_2026_START = new Date("2026-01-08T00:00:00Z").getTime();
 
-    async function runSeasonFetch({ puuid, startOffset, setMatches, setOffset, setDone, runningRef, seenIds }) {
-        if (runningRef.current) return;
-        runningRef.current = true;
-
-        let offset = startOffset;
-        let fetched = 0;
-
-        while (runningRef.current && fetched < 200) {
-            try {
-                const more = await invoke("get_more_matches", { puuid, start: offset });
-
-                // more.length === 0 significa che Riot API non ha più match → fine
-                if (!more || more.length === 0) break;
-
-                const rawMatches = more.filter(m => m?.metadata || m?.info);
-
-                // Dedup usando il set esterno (immune da race condition React state)
-                const newMatches = rawMatches.filter(m => {
-                    const id = m?.metadata?.matchId ?? m?.matchId;
-                    if (!id || seenIds.current.has(id)) return false;
-                    seenIds.current.add(id);
-                    return true;
-                });
-
-                if (newMatches.length > 0) {
-                    setMatches(prev => [...prev, ...newMatches]);
-                    fetched += newMatches.length;
-                }
-
-                // L'offset va avanzato di 10 (quanti ne chiede get_more_matches a Riot)
-                offset += 10;
-                if (setOffset) setOffset(offset);
-
-                // Se Riot ha restituito meno di 10 match, siamo alla fine della season
-                if (more.length < 10) break;
-
-                await new Promise(r => setTimeout(r, 3000));
-            } catch (e) {
-                const msg = String(e).toLowerCase();
-                if (msg.includes("429") || msg.includes("rate limit")) {
-                    console.warn("Rate limit Riot, attendo 12s...");
-                    await new Promise(r => setTimeout(r, 12000));
-                } else {
-                    console.error("Errore fetch season:", e);
-                    break;
-                }
-            }
-        }
-
-        runningRef.current = false;
-        setDone(true);
+    function filterSeasonMatches(matches) {
+        if (!Array.isArray(matches)) return [];
+        return matches.filter(m => {
+            if (!m?.metadata && !m?.info) return false;
+            const gc = m?.info?.gameCreation ?? m?.gameCreation ?? 0;
+            return gc >= SEASON_2026_START;
+        });
     }
 
-    function fetchSeasonMatches(puuid, startOffset) {
-        return runSeasonFetch({
-            puuid, startOffset,
-            setMatches: setAllMatches,
-            setOffset: setMatchOffset,
-            setDone: setSeasonFetchDone,
-            runningRef: seasonFetchRunning,
-            seenIds: seenMatchIds,
-        });
+    function dedupeMatches(arr) {
+        const map = new Map();
+        for (const m of (arr ?? [])) {
+            const id = m?.metadata?.matchId ?? m?.matchId;
+            if (id) map.set(id, m);
+        }
+        return Array.from(map.values());
+    }
+
+    // ✅ FIX: helper per impostare recentStats con fallback su errore
+    function fetchRecentStats(puuid, r, setter) {
+        invoke("get_recent_stats", { puuid, region: r })
+            .then(stats => setter(stats))
+            .catch(e => {
+                console.warn("[recentStats] fallito:", e);
+                setter({ champWr7d: [], recentAllies: [] }); // evita spinner infinito
+            });
+    }
+
+    async function fetchDataWithRegion(r) {
+        try {
+            const res = await invoke("get_profiles", { region: r });
+            setProfileData(res);
+            setError(null);
+            const isNewPlayer = !matchesInitialized.current || lastLoadedPuuid.current !== res.puuid;
+            if (isNewPlayer) {
+                matchesInitialized.current = true;
+                lastLoadedPuuid.current = res.puuid;
+                if (res?.matches) {
+                    setAllMatches(dedupeMatches(res.matches));
+                    latestMatchId.current = res.matches[0]?.metadata?.matchId ?? null;
+                }
+                if (res?.puuid) fetchRecentStats(res.puuid, r, setRecentStats);
+            }
+        } catch (err) {
+            console.warn("[fetchDataWithRegion] Chiamata fallita:", err);
+        } finally {
+            setLoading(false);
+        }
     }
 
     async function fetchData() {
         try {
-            const res = await invoke("get_profiles");
+            const res = await invoke("get_profiles", { region: regionRef.current });
             setProfileData(res);
             setError(null);
-
             const isNewPlayer = !matchesInitialized.current || lastLoadedPuuid.current !== res.puuid;
-
             if (isNewPlayer) {
-                // Prima inizializzazione o cambio account
                 matchesInitialized.current = true;
                 lastLoadedPuuid.current = res.puuid;
-                seasonFetchRunning.current = false;
-                setSeasonFetchDone(false);
-
-                // Riot API — conserva i match raw (con info.participants)
                 if (res?.matches) {
-                    const filtered = res.matches.filter(m => m?.metadata || m?.info);
-                    // Popola il set di dedup con i match già caricati
-                    seenMatchIds.current = new Set(
-                        filtered.map(m => m?.metadata?.matchId ?? m?.matchId).filter(Boolean)
-                    );
-                    setAllMatches(filtered);
-                    const initialOffset = 20;
-                    setMatchOffset(initialOffset);
-                    latestMatchId.current = filtered[0]?.metadata?.matchId ?? null;
-                    fetchSeasonMatches(res.puuid, initialOffset);
+                    setAllMatches(dedupeMatches(res.matches));
+                    latestMatchId.current = res.matches[0]?.metadata?.matchId ?? null;
                 }
-
+                if (res?.puuid) fetchRecentStats(res.puuid, regionRef.current, setRecentStats);
             } else {
-                // Polling periodico: controlla se ci sono nuove partite via Riot API
-                // Salta se il season fetch è ancora in corso (evita rate limit)
-                if (seasonFetchRunning.current) {
-                    console.log("[Refresh] Season fetch in corso, salto check nuove partite.");
-                    return;
-                }
                 try {
-                    const more = await invoke("get_more_matches", {
-                        puuid: res.puuid,
-                        start: 0,
-                    });
-                    const fresh = more?.filter(m => m?.metadata || m?.info) ?? [];
+                    const more = await invoke("get_more_matches", { puuid: res.puuid, start: 0, region: regionRef.current });
+                    const fresh = more ?? [];
                     if (fresh.length > 0) {
                         const newestId = fresh[0]?.metadata?.matchId;
                         if (newestId && newestId !== latestMatchId.current) {
-                            console.log("[Refresh] Nuova partita rilevata:", newestId);
                             latestMatchId.current = newestId;
                             setAllMatches(prev => {
                                 const existingIds = new Set(prev.map(m => m?.metadata?.matchId ?? m?.matchId));
-                                const newOnes = fresh.filter(m => {
-                                    const id = m?.metadata?.matchId;
-                                    return id && !existingIds.has(id);
-                                });
+                                const newOnes = fresh.filter(m => { const id = m?.metadata?.matchId; return id && !existingIds.has(id); });
                                 return newOnes.length > 0 ? [...newOnes, ...prev] : prev;
                             });
                         }
                     }
-                } catch (riotErr) {
-                    console.warn("[Refresh] Impossibile controllare nuove partite:", riotErr);
-                }
+                } catch (riotErr) { console.warn("[Refresh] Impossibile controllare nuove partite:", riotErr); }
             }
         } catch (err) {
             console.warn("Chiamata fallita:", err);
@@ -384,142 +287,94 @@ export default function App() {
     }
 
     useEffect(() => {
+        detectRegionFromLCU();
         fetchData();
-        const interval = setInterval(fetchData, 60000); // 60s — evita rate limit durante season fetch
-        return () => clearInterval(interval);
+        const interval = setInterval(fetchData, 60000);
+        const regionInterval = setInterval(detectRegionFromLCU, 30000);
+        return () => { clearInterval(interval); clearInterval(regionInterval); };
     }, []);
 
-    // ── Auto-updater ──────────────────────────────────────────────
     useEffect(() => {
         async function checkForUpdates() {
             try {
                 const update = await check();
-                // Debug: logga sempre le versioni per diagnosticare falsi positivi
-                console.log(
-                    `[Updater] currentVersion: ${update?.currentVersion} | latestVersion: ${update?.version} | available: ${update?.available}`
-                );
+                console.log(`[Updater] currentVersion: ${update?.currentVersion} | latestVersion: ${update?.version} | available: ${update?.available}`);
                 if (update?.available && update.version !== update.currentVersion) {
                     updateRef.current = update;
                     setUpdateInfo({ version: update.version, body: update.body ?? "" });
                     setUpdateStatus("available");
-                } else {
-                    console.log("[Updater] Nessun aggiornamento disponibile.");
                 }
-            } catch (e) {
-                console.error("[Updater] Errore:", e);
-            }
+            } catch (e) { console.error("[Updater] Errore:", e); }
         }
         checkForUpdates();
     }, []);
 
     async function handleUpdate() {
-        // Se è un fake update (nessun ref reale), simula il download
-        if (!updateRef.current) {
-            await window.__fakeDownload?.();
-            return;
-        }
+        if (!updateRef.current) { await window.__fakeDownload?.(); return; }
         setUpdateStatus("downloading");
         setUpdateProgress(0);
         try {
             await updateRef.current.downloadAndInstall((event) => {
-                if (event.event === "Started") {
-                    setUpdateProgress(0);
-                } else if (event.event === "Progress") {
+                if (event.event === "Started") setUpdateProgress(0);
+                else if (event.event === "Progress") {
                     const { chunkLength, contentLength } = event.data;
-                    if (contentLength) {
-                        setUpdateProgress(prev => Math.min(100, prev + (chunkLength / contentLength) * 100));
-                    }
+                    if (contentLength) setUpdateProgress(prev => Math.min(100, prev + (chunkLength / contentLength) * 100));
                 } else if (event.event === "Finished") {
                     setUpdateProgress(100);
                     setUpdateStatus("done");
                     setTimeout(() => relaunch(), 1500);
                 }
             });
-        } catch (e) {
-            console.error("[Updater] Errore download:", e);
-            setUpdateStatus("available");
-        }
+        } catch (e) { console.error("[Updater] Errore download:", e); setUpdateStatus("available"); }
     }
 
-    function handleDismissUpdate() {
-        setUpdateStatus("idle");
-        setUpdateInfo(null);
-    }
+    function handleDismissUpdate() { setUpdateStatus("idle"); setUpdateInfo(null); }
 
     async function loadMoreMatches() {
-        if (!profileData?.puuid) return;
+        if (!profileData?.puuid) return 0;
         setLoadingMore(true);
+        const snapshot = dedupeMatches(allMatches);
+        const existingIds = new Set(snapshot.map(m => m?.metadata?.matchId ?? m?.matchId).filter(Boolean));
         try {
-            const more = await invoke("get_more_matches", {
-                puuid: profileData.puuid,
-                start: matchOffset,
-            });
-            const raw = more.filter(m => m?.metadata || m?.info);
-            const newMatches = raw.filter(m => {
-                const id = m?.metadata?.matchId ?? m?.matchId;
-                if (!id || seenMatchIds.current.has(id)) return false;
-                seenMatchIds.current.add(id);
-                return true;
-            });
-            if (newMatches.length > 0) setAllMatches(prev => [...prev, ...newMatches]);
-            setMatchOffset(prev => prev + 10);
-        } catch (e) {
-            console.error("Errore carica altri:", e);
-        } finally {
-            setLoadingMore(false);
-        }
+            const more = await invoke("get_more_matches", { puuid: profileData.puuid, start: snapshot.length, region: regionRef.current });
+            if (!more || more.length === 0) return 0;
+            const trueNew = more.filter(m => { const id = m?.metadata?.matchId ?? m?.matchId; return id && !existingIds.has(id); });
+            if (trueNew.length > 0) { setAllMatches(prev => dedupeMatches([...prev, ...trueNew])); return trueNew.length; }
+            return 0;
+        } catch (e) { console.error("[loadMore] ERROR:", e); return 0; }
+        finally { setLoadingMore(false); }
     }
 
     async function loadMoreSearchMatches() {
-        if (!searchData?.puuid) return;
+        if (!searchData?.puuid) return 0;
         setLoadingMoreSearch(true);
+        const currentMatches = dedupeMatches(searchData.matches ?? []);
+        const existingIds = new Set(currentMatches.map(m => m?.metadata?.matchId ?? m?.matchId).filter(Boolean));
         try {
-            const offset = searchMatchOffset === 0 ? 20 : searchMatchOffset;
-            const more = await invoke("get_more_matches", {
-                puuid: searchData.puuid,
-                start: offset,
-            });
-            const raw = more.filter(m => m?.metadata || m?.info);
-            const newMatches = raw.filter(m => {
-                const id = m?.metadata?.matchId ?? m?.matchId;
-                if (!id || seenSearchMatchIds.current.has(id)) return false;
-                seenSearchMatchIds.current.add(id);
-                return true;
-            });
-            if (newMatches.length > 0) setSearchExtraMatches(prev => [...prev, ...newMatches]);
-            setSearchMatchOffset(offset + 10);
-        } catch (e) {
-            console.error("Errore carica altri search:", e);
-        } finally {
-            setLoadingMoreSearch(false);
-        }
-    }
-
-    function fetchSeasonMatchesForSearch(puuid) {
-        return runSeasonFetch({
-            puuid, startOffset: 20, // search_summoner fetcha 20, partiamo da 20
-            setMatches: setSearchExtraMatches,
-            setOffset: null,
-            setDone: setSearchSeasonFetchDone,
-            runningRef: searchSeasonFetchRunning,
-            seenIds: seenSearchMatchIds,
-        });
+            const more = await invoke("get_more_matches", { puuid: searchData.puuid, start: currentMatches.length, region: searchData._region ?? regionRef.current });
+            if (!more || more.length === 0) return 0;
+            const trueNew = more.filter(m => { const id = m?.metadata?.matchId ?? m?.matchId; return id && !existingIds.has(id); });
+            if (trueNew.length > 0) {
+                setSearchData(prev => ({ ...prev, matches: dedupeMatches([...(prev.matches ?? []), ...trueNew]) }));
+                return trueNew.length;
+            }
+            return 0;
+        } catch (e) { console.error("[loadMoreSearch] ERROR:", e); return 0; }
+        finally { setLoadingMoreSearch(false); }
     }
 
     async function doSearch(gameName, tagLine) {
         setSearching(true);
         setSearchError(null);
-        setSearchExtraMatches([]);
-        setSearchMatchOffset(0);
-        setSearchSeasonFetchDone(false);
-        searchSeasonFetchRunning.current = false;
         setShowDropdown(false);
         setLiveSuggestions([]);
         try {
-            const res = await invoke("search_summoner", { gameName: gameName.trim(), tagLine: tagLine.trim() });
-            setSearchData(res);
-
-            // Salva in cronologia con icona e rank
+            const searchRegion = regionRef.current;
+            const res = await invoke("search_summoner", { gameName: gameName.trim(), tagLine: tagLine.trim(), region: searchRegion });
+            setSearchData({ ...res, _region: searchRegion });
+            setSearchRecentStats(null);
+            // ✅ FIX: fallback su errore per searchRecentStats
+            if (res?.puuid) fetchRecentStats(res.puuid, searchRegion, setSearchRecentStats);
             const soloEntry = res?.ranked_entries?.find(e => e.queueType === "RANKED_SOLO_5x5");
             saveHistory({
                 name: res?.profile?.gameName ?? gameName.trim(),
@@ -529,54 +384,16 @@ export default function App() {
                 rank: soloEntry?.rank ?? soloEntry?.division ?? "",
                 lp: soloEntry?.leaguePoints ?? 0,
             });
-
-            // Popola seenSearchMatchIds con i match già caricati da search_summoner
-            const initialMatches = res?.matches?.filter(m => m?.metadata || m?.info) || [];
-            seenSearchMatchIds.current = new Set(
-                initialMatches.map(m => m?.metadata?.matchId ?? m?.matchId).filter(Boolean)
-            );
-
-            // Usa Riot API season fetch
-            fetchSeasonMatchesForSearch(res.puuid);
         } catch (err) {
             console.error("[RLP search] Error:", err);
             setSearchData(null);
-        } finally {
-            setSearching(false);
-        }
+            setSearchError(String(err));
+        } finally { setSearching(false); }
     }
 
     async function handleSearch(e) {
         if (e.key !== "Enter" && e.type !== "click") return;
-        // Normalizza l'input: decodifica "+" come spazio (formato URL da LoG/op.gg)
-        // e supporta sia "Nome#TAG" che "Nome-TAG" (formato leagueofgraphs)
         const raw = searchQuery.trim().replace(/\+/g, " ");
-        let gameName, tagLine;
-        if (raw.includes("#")) {
-            // Formato standard: "Lucid Dreams#RAGO"
-            const idx = raw.indexOf("#");
-            gameName = raw.slice(0, idx);
-            tagLine = raw.slice(idx + 1);
-        } else {
-            // Formato LoG: "Lucid Dreams-RAGO" — split sull'ultimo "-"
-            const idx = raw.lastIndexOf("-");
-            if (idx === -1) {
-                console.warn("[RLP] Formato non valido: usa NomeSummoner#TAG");
-                return;
-            }
-            gameName = raw.slice(0, idx);
-            tagLine = raw.slice(idx + 1);
-        }
-        if (!gameName || !tagLine) {
-            console.warn("[RLP] Formato non valido: usa NomeSummoner#TAG");
-            return;
-        }
-        setActiveTab("profile");
-        await doSearch(gameName, tagLine);
-    }
-
-    async function handlePlayerClick(summonerId) {
-        const raw = summonerId.trim().replace(/\+/g, " ");
         let gameName, tagLine;
         if (raw.includes("#")) {
             const idx = raw.indexOf("#");
@@ -589,21 +406,29 @@ export default function App() {
             tagLine = raw.slice(idx + 1);
         }
         if (!gameName || !tagLine) return;
+        setActiveTab("profile");
+        await doSearch(gameName, tagLine);
+    }
+
+    async function handlePlayerClick(summonerId) {
+        const raw = summonerId.trim().replace(/\+/g, " ");
+        let gameName, tagLine;
+        if (raw.includes("#")) { const idx = raw.indexOf("#"); gameName = raw.slice(0, idx); tagLine = raw.slice(idx + 1); }
+        else { const idx = raw.lastIndexOf("-"); if (idx === -1) return; gameName = raw.slice(0, idx); tagLine = raw.slice(idx + 1); }
+        if (!gameName || !tagLine) return;
         setSearchQuery(`${gameName}#${tagLine}`);
         setActiveTab("profile");
         await doSearch(gameName, tagLine);
     }
 
     function handleViewLiveGame(puuid) {
-        const target = puuid || null;
-        liveGamePuuidRef.current = target;
-        setLiveGamePuuid(target);
+        liveGamePuuidRef.current = puuid || null;
+        setLiveGamePuuid(puuid || null);
         setActiveTab("live-game");
     }
 
     function handleTabChange(tab) {
         if (tab === "live-game") {
-            // Usa il puuid del profilo attualmente visualizzato (search o proprio)
             const activePuuid = searchData?.puuid ?? myPuuid ?? null;
             liveGamePuuidRef.current = activePuuid;
             setLiveGamePuuid(activePuuid);
@@ -612,89 +437,85 @@ export default function App() {
     }
 
     function clearSearch() {
-        // Aggiorna il puuid della live game tab al proprio profilo prima di pulire la ricerca
         const ownPuuid = profileData?.puuid ?? null;
         liveGamePuuidRef.current = ownPuuid;
         setLiveGamePuuid(ownPuuid);
-
         setSearchData(null);
         setSearchQuery("");
         setSearchError(null);
-        setSearchExtraMatches([]);
-        setSearchMatchOffset(0);
-        setSearchSeasonFetchDone(false);
-        searchSeasonFetchRunning.current = false;
     }
 
     function mapRanked(ranked, queueType) {
         if (!ranked) return null;
-
-        // Formato 1: queueMap è un oggetto keyed per queueType
-        // Formato 2: queues è un array (risposta LCU /lol-ranked/v1/current-ranked-stats)
-        let queue = ranked.queueMap?.[queueType]
-            ?? ranked.queues?.find(q => q.queueType === queueType);
-
+        let queue = ranked.queueMap?.[queueType] ?? ranked.queues?.find(q => q.queueType === queueType);
         if (!queue || !queue.tier || queue.tier === "" || queue.division === "NA") return null;
-        return {
-            tier: queue.tier,
-            rank: queue.division,
-            leaguePoints: queue.leaguePoints,
-            wins: queue.wins,
-            losses: queue.losses,
-        };
+        return { tier: queue.tier, rank: queue.division, leaguePoints: queue.leaguePoints, wins: queue.wins, losses: queue.losses };
     }
 
     function mapRankedFromEntries(entries, queueType) {
         if (!entries || !Array.isArray(entries)) return null;
         const queue = entries.find(e => e.queueType === queueType);
         if (!queue) return null;
-        return {
-            tier: queue.tier,
-            rank: queue.rank,
-            leaguePoints: queue.leaguePoints,
-            wins: queue.wins,
-            losses: queue.losses,
-        };
+        return { tier: queue.tier, rank: queue.rank, leaguePoints: queue.leaguePoints, wins: queue.wins, losses: queue.losses };
     }
 
     const rankedSolo = profileData ? mapRanked(profileData.ranked, "RANKED_SOLO_5x5") : null;
     const rankedFlex = profileData ? mapRanked(profileData.ranked, "RANKED_FLEX_SR") : null;
-
     const myPuuid = profileData?.puuid ?? null;
-    const mySummonerName = profileData?.profile?.gameName
-        ? `${profileData.profile.gameName}#${profileData.profile.tagLine}`
-        : null;
-
-    const searchMatches = [
-        ...(searchData?.matches?.filter(m => m?.metadata || m?.info) || []),
-        ...searchExtraMatches,
-    ];
+    const mySummonerName = profileData?.profile?.gameName ? `${profileData.profile.gameName}#${profileData.profile.tagLine}` : null;
+    const searchMatches = dedupeMatches(searchData?.matches ?? []);
     const searchRankedSolo = searchData ? mapRankedFromEntries(searchData.ranked_entries, "RANKED_SOLO_5x5") : null;
     const searchRankedFlex = searchData ? mapRankedFromEntries(searchData.ranked_entries, "RANKED_FLEX_SR") : null;
-
     const activeMatches = searchData ? searchMatches : allMatches;
     const activeProfile = searchData ? searchData.profile : profileData?.profile;
 
     return (
         <div className="min-h-screen bg-gradient-to-br from-[#040c1a] via-[#070f1e] to-[#040c1a]">
-            {/* Header */}
             <header className="border-b border-[#0f2040] bg-[#070f1e]/50 backdrop-blur-sm sticky top-0 z-50">
                 <div className="max-w-7xl mx-auto px-4 py-4">
                     <div className="flex items-center justify-between">
                         <div className="flex items-center gap-3">
-                            <img
-                                src="/RLP Icon.png"
-                                alt="RLP Logo"
-                                className="w-16 h-16 rounded-xl object-cover"
-                                onError={e => { e.target.src = "/RLP_Icon.png"; }}
-                            />
+                            <img src="/RLP Icon.png" alt="RLP Logo" className="w-16 h-16 rounded-xl object-cover" onError={e => { e.target.src = "/RLP_Icon.png"; }} />
                             <div>
                                 <h1 className="text-xl font-bold text-white">Raise League Power</h1>
                                 <p className="text-xs text-[#5a8ab0]">Statistics & Analytics</p>
                             </div>
                         </div>
                         <div className="flex items-center gap-3">
-                            {/* Search con dropdown cronologia + suggerimenti live */}
+                            <div className="relative flex items-center">
+                                <select
+                                    value={region}
+                                    onChange={e => changeRegion(e.target.value)}
+                                    className="bg-[#0d1f38] border border-[#1a3558] text-white text-sm rounded-lg pl-2 pr-7 py-2 focus:border-[#1e6fff] focus:outline-none cursor-pointer appearance-none"
+                                    title={regionAutoDetected ? "Regione rilevata automaticamente dal client" : "Seleziona server"}
+                                >
+                                    <optgroup label="Europe">
+                                        <option value="euw">EUW</option>
+                                        <option value="eune">EUNE</option>
+                                        <option value="tr">TR</option>
+                                        <option value="ru">RU</option>
+                                    </optgroup>
+                                    <optgroup label="Americas">
+                                        <option value="na">NA</option>
+                                        <option value="br">BR</option>
+                                        <option value="lan">LAN</option>
+                                        <option value="las">LAS</option>
+                                    </optgroup>
+                                    <optgroup label="Asia">
+                                        <option value="kr">KR</option>
+                                        <option value="jp">JP</option>
+                                    </optgroup>
+                                    <optgroup label="Pacific">
+                                        <option value="oce">OCE</option>
+                                        <option value="sg">SG</option>
+                                        <option value="tw">TW</option>
+                                        <option value="vn">VN</option>
+                                    </optgroup>
+                                </select>
+                                {regionAutoDetected && (
+                                    <span className="absolute -top-1.5 -right-1 text-[9px] font-bold bg-[#1e6fff] text-white rounded px-1 leading-tight pointer-events-none" title="Regione rilevata automaticamente dal client League">AUTO</span>
+                                )}
+                            </div>
                             <div className="relative hidden md:block" ref={searchWrapperRef}>
                                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[#5a8ab0] pointer-events-none z-10" />
                                 <Input
@@ -702,105 +523,44 @@ export default function App() {
                                     value={searchQuery}
                                     onChange={e => onSearchInput(e.target.value)}
                                     onFocus={() => setShowDropdown(true)}
-                                    onKeyDown={e => {
-                                        if (e.key === "Escape") { setShowDropdown(false); return; }
-                                        handleSearch(e);
-                                    }}
+                                    onKeyDown={e => { if (e.key === "Escape") { setShowDropdown(false); return; } handleSearch(e); }}
                                     className="pl-10 w-72 bg-[#0d1f38] border-[#1a3558] text-white placeholder:text-[#3a6080] focus:border-[#1e6fff] transition-colors"
                                 />
-                                {/* Dropdown */}
                                 {showDropdown && (dropdownItems.length > 0 || loadingSuggestions) && (
                                     <div className="absolute top-full left-0 mt-1.5 w-full bg-[#08162b] border border-[#1a3558] rounded-xl shadow-2xl z-50 overflow-hidden">
-                                        {/* Header dropdown */}
                                         <div className="flex items-center justify-between px-3 pt-2 pb-1 border-b border-[#0f2040]">
-                                            <span className="text-[#3a6080] text-[12px] font-bold uppercase tracking-widest">
-                                                {searchQuery.trim().length > 0 ? "Risultati" : "Recenti"}
-                                            </span>
+                                            <span className="text-[#3a6080] text-[12px] font-bold uppercase tracking-widest">{searchQuery.trim().length > 0 ? "Risultati" : "Recenti"}</span>
                                             <div className="flex items-center gap-2">
-                                                {loadingSuggestions && (
-                                                    <span className="text-[#3a6080] text-[12px]">...</span>
-                                                )}
+                                                {loadingSuggestions && <span className="text-[#3a6080] text-[12px]">...</span>}
                                                 {searchHistory.length > 0 && !searchQuery.trim() && (
-                                                    <button
-                                                        onClick={() => {
-                                                            setSearchHistory([]);
-                                                            try { localStorage.removeItem(HISTORY_KEY); } catch { }
-                                                        }}
-                                                        className="text-[#2a5070] hover:text-red-400 text-[12px] transition-colors"
-                                                    >
-                                                        Cancella
-                                                    </button>
+                                                    <button onClick={() => { setSearchHistory([]); try { localStorage.removeItem(HISTORY_KEY); } catch { } }} className="text-[#2a5070] hover:text-red-400 text-[12px] transition-colors">Cancella</button>
                                                 )}
                                             </div>
                                         </div>
-
-                                        {/* Items */}
                                         {dropdownItems.map((entry, i) => {
                                             const PATCH_LOCAL = "16.4.1";
-                                            const tierColor = {
-                                                IRON: "text-[#8ab0cc]", BRONZE: "text-amber-600",
-                                                SILVER: "text-[#9ab8d0]", GOLD: "text-yellow-400",
-                                                PLATINUM: "text-teal-400", EMERALD: "text-emerald-400",
-                                                DIAMOND: "text-[#4fc3f7]", MASTER: "text-purple-400",
-                                                GRANDMASTER: "text-red-400", CHALLENGER: "text-yellow-300",
-                                            }[entry.tier?.toUpperCase()] ?? "text-[#5a8ab0]";
-                                            const tierLabel = entry.tier
-                                                ? `${entry.tier.charAt(0).toUpperCase()}${entry.tier.slice(1).toLowerCase()}${!["MASTER", "GRANDMASTER", "CHALLENGER"].includes(entry.tier?.toUpperCase()) && entry.rank ? ` ${entry.rank}` : ""}`
-                                                : null;
-
+                                            const tierColor = { IRON: "text-[#8ab0cc]", BRONZE: "text-amber-600", SILVER: "text-[#9ab8d0]", GOLD: "text-yellow-400", PLATINUM: "text-teal-400", EMERALD: "text-emerald-400", DIAMOND: "text-[#4fc3f7]", MASTER: "text-purple-400", GRANDMASTER: "text-red-400", CHALLENGER: "text-yellow-300" }[entry.tier?.toUpperCase()] ?? "text-[#5a8ab0]";
+                                            const tierLabel = entry.tier ? `${entry.tier.charAt(0).toUpperCase()}${entry.tier.slice(1).toLowerCase()}${!["MASTER", "GRANDMASTER", "CHALLENGER"].includes(entry.tier?.toUpperCase()) && entry.rank ? ` ${entry.rank}` : ""}` : null;
                                             return (
-                                                <div
-                                                    key={i}
-                                                    className="flex items-center gap-2 px-3 py-1.5 hover:bg-[#0d1f38] cursor-pointer group transition-colors"
-                                                    onClick={() => {
-                                                        const q = `${entry.name}#${entry.tag}`;
-                                                        setSearchQuery(q);
-                                                        setShowDropdown(false);
-                                                        setActiveTab("profile");
-                                                        doSearch(entry.name, entry.tag);
-                                                    }}
-                                                >
-                                                    {/* Avatar */}
+                                                <div key={i} className="flex items-center gap-2 px-3 py-1.5 hover:bg-[#0d1f38] cursor-pointer group transition-colors"
+                                                    onClick={() => { setSearchQuery(`${entry.name}#${entry.tag}`); setShowDropdown(false); setActiveTab("profile"); doSearch(entry.name, entry.tag); }}>
                                                     <div className="relative shrink-0">
                                                         {entry.profileIconId ? (
-                                                            <img
-                                                                src={`https://ddragon.leagueoflegends.com/cdn/${PATCH_LOCAL}/img/profileicon/${entry.profileIconId}.png`}
-                                                                alt=""
-                                                                className="w-7 h-7 rounded-full object-cover border border-[#1a3558]"
-                                                                onError={e => { e.target.style.display = "none"; }}
-                                                            />
+                                                            <img src={`https://ddragon.leagueoflegends.com/cdn/${PATCH_LOCAL}/img/profileicon/${entry.profileIconId}.png`} alt="" className="w-7 h-7 rounded-full object-cover border border-[#1a3558]" onError={e => { e.target.style.display = "none"; }} />
                                                         ) : (
-                                                            <div className="w-7 h-7 rounded-full bg-[#142545] border border-[#1a3558] flex items-center justify-center">
-                                                                <User className="w-3 h-3 text-[#3a6080]" />
-                                                            </div>
+                                                            <div className="w-7 h-7 rounded-full bg-[#142545] border border-[#1a3558] flex items-center justify-center"><User className="w-3 h-3 text-[#3a6080]" /></div>
                                                         )}
-                                                        {entry._live && (
-                                                            <span className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 bg-[#1e6fff] rounded-full border border-[#08162b]" />
-                                                        )}
+                                                        {entry._live && <span className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 bg-[#1e6fff] rounded-full border border-[#08162b]" />}
                                                     </div>
-
-                                                    {/* Info */}
                                                     <div className="flex-1 min-w-0">
                                                         <div className="flex items-center gap-1.5">
                                                             <span className="text-white text-sm font-semibold truncate">{entry.name}</span>
                                                             <span className="text-[#3a6080] text-sm shrink-0">#{entry.tag}</span>
                                                         </div>
-                                                        {tierLabel ? (
-                                                            <span className={`text-[12px] font-medium ${tierColor}`}>
-                                                                {tierLabel}{entry.lp > 0 ? ` · ${entry.lp}LP` : ""}
-                                                            </span>
-                                                        ) : (
-                                                            <span className="text-[#3a6080] text-[12px]">Unranked</span>
-                                                        )}
+                                                        {tierLabel ? <span className={`text-[12px] font-medium ${tierColor}`}>{tierLabel}{entry.lp > 0 ? ` · ${entry.lp}LP` : ""}</span> : <span className="text-[#3a6080] text-[12px]">Unranked</span>}
                                                     </div>
-
-                                                    {/* Remove (solo history) */}
                                                     {!entry._live && (
-                                                        <button
-                                                            onClick={e => removeFromHistory(entry, e)}
-                                                            className="text-[#2a5070] hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all shrink-0 p-1"
-                                                            title="Rimuovi"
-                                                        >
+                                                        <button onClick={e => removeFromHistory(entry, e)} className="text-[#2a5070] hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all shrink-0 p-1" title="Rimuovi">
                                                             <X className="w-3.5 h-3.5" />
                                                         </button>
                                                     )}
@@ -810,221 +570,96 @@ export default function App() {
                                     </div>
                                 )}
                             </div>
-                            <Button
-                                onClick={handleSearch}
-                                disabled={searching}
-                                className="bg-[#1e6fff] hover:bg-[#1459d4] text-white"
-                            >
-                                {searching ? "..." : "Search"}
-                            </Button>
-                            {searchData && (
-                                <Button
-                                    onClick={clearSearch}
-                                    className="bg-[#142545] hover:bg-[#1e3560] text-white text-xs px-3"
-                                >
-                                    ✕ Il tuo profilo
-                                </Button>
-                            )}
+                            <Button onClick={handleSearch} disabled={searching} className="bg-[#1e6fff] hover:bg-[#1459d4] text-white">{searching ? "..." : "Search"}</Button>
+                            {searchData && <Button onClick={clearSearch} className="bg-[#142545] hover:bg-[#1e3560] text-white text-xs px-3">✕ Il tuo profilo</Button>}
                         </div>
                     </div>
                 </div>
             </header>
 
-            {/* Banner summoner cercato */}
-            {searchData && (
+            {searchError && (
                 <div className="max-w-7xl mx-auto px-4 mt-4">
-                    <div className="p-3 bg-[#0a1e4a]/50 border border-[#1459d4] text-[#a8e4ff] rounded-lg text-sm flex items-center justify-between">
-                        <span>
-                            Stai visualizzando il profilo di{" "}
-                            <strong>{searchData.profile?.gameName}#{searchData.profile?.tagLine}</strong>
-                        </span>
-                        <button onClick={clearSearch} className="text-[#4fc3f7] hover:text-white text-xs underline">
-                            Torna al tuo profilo
-                        </button>
+                    <div className="p-3 bg-red-950/60 border border-red-700/60 text-red-300 rounded-lg text-sm flex items-center justify-between gap-3">
+                        <div className="flex items-center gap-2">
+                            <span className="text-red-400 text-base">⚠</span>
+                            <span>{searchError}</span>
+                        </div>
+                        <button onClick={() => setSearchError(null)} className="text-red-400 hover:text-white text-xs underline shrink-0">Chiudi</button>
                     </div>
                 </div>
             )}
 
-            {/* searchError logged to console only */}
+            {searchData && (
+                <div className="max-w-7xl mx-auto px-4 mt-4">
+                    <div className="p-3 bg-[#0a1e4a]/50 border border-[#1459d4] text-[#a8e4ff] rounded-lg text-sm flex items-center justify-between">
+                        <span>Stai visualizzando il profilo di <strong>{searchData.profile?.gameName}#{searchData.profile?.tagLine}</strong></span>
+                        <button onClick={clearSearch} className="text-[#4fc3f7] hover:text-white text-xs underline">Torna al tuo profilo</button>
+                    </div>
+                </div>
+            )}
 
-            {/* Errori profilo */}
-            {/* Offline mode: dev only — hidden from UI */}
-            {/* CLIENT_CLOSED error logged to console only */}
-
-            {/* Main */}
             <main className="max-w-7xl mx-auto px-4 py-8">
                 <Tabs value={activeTab} onValueChange={handleTabChange} className="space-y-6">
                     <TabsList className="bg-[#070f1e] border border-[#0f2040] p-1 rounded-lg">
-                        <TabsTrigger
-                            value="profile"
-                            className="data-[state=active]:bg-[#1e6fff] data-[state=active]:text-white"
-                        >
-                            <User className="w-4 h-4 mr-2" />
-                            Profile
-                        </TabsTrigger>
-                        <TabsTrigger
-                            value="matches"
-                            className="data-[state=active]:bg-[#1e6fff] data-[state=active]:text-white"
-                        >
-                            <History className="w-4 h-4 mr-2" />
-                            Match History
-                        </TabsTrigger>
-                        <TabsTrigger
-                            value="masteries"
-                            className="data-[state=active]:bg-[#1e6fff] data-[state=active]:text-white"
-                        >
-                            <Star className="w-4 h-4 mr-2" />
-                            Maestrie
-                        </TabsTrigger>
-                        <TabsTrigger
-                            value="meta"
-                            className="data-[state=active]:bg-[#1e6fff] data-[state=active]:text-white"
-                        >
-                            <TrendingUp className="w-4 h-4 mr-2" />
-                            Champion Stats
-                        </TabsTrigger>
-                        <TabsTrigger
-                            value="tier-list"
-                            className="data-[state=active]:bg-[#1e6fff] data-[state=active]:text-white"
-                        >
-                            <BarChart2 className="w-4 h-4 mr-2" />
-                            Tier List
-                        </TabsTrigger>
+                        <TabsTrigger value="profile" className="data-[state=active]:bg-[#1e6fff] data-[state=active]:text-white"><User className="w-4 h-4 mr-2" />Profile</TabsTrigger>
+                        <TabsTrigger value="matches" className="data-[state=active]:bg-[#1e6fff] data-[state=active]:text-white"><History className="w-4 h-4 mr-2" />Match History</TabsTrigger>
+                        <TabsTrigger value="masteries" className="data-[state=active]:bg-[#1e6fff] data-[state=active]:text-white"><Star className="w-4 h-4 mr-2" />Maestrie</TabsTrigger>
+                        <TabsTrigger value="meta" className="data-[state=active]:bg-[#1e6fff] data-[state=active]:text-white"><TrendingUp className="w-4 h-4 mr-2" />Champion Stats</TabsTrigger>
+                        <TabsTrigger value="tier-list" className="data-[state=active]:bg-[#1e6fff] data-[state=active]:text-white"><BarChart2 className="w-4 h-4 mr-2" />Tier List</TabsTrigger>
                         {!searchData && profileData && (
-                            <TabsTrigger
-                                value="champ-select"
-                                className="data-[state=active]:bg-[#1e6fff] data-[state=active]:text-white relative"
-                            >
-                                <Swords className="w-4 h-4 mr-2" />
-                                Auto Import
-                                {isInChampSelect && (
-                                    <span className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-green-400 rounded-full animate-pulse" />
-                                )}
+                            <TabsTrigger value="champ-select" className="data-[state=active]:bg-[#1e6fff] data-[state=active]:text-white relative">
+                                <Swords className="w-4 h-4 mr-2" />Auto Import
+                                {isInChampSelect && <span className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-green-400 rounded-full animate-pulse" />}
                             </TabsTrigger>
                         )}
-                        <TabsTrigger
-                            value="live-game"
-                            className="data-[state=active]:bg-[#1e6fff] data-[state=active]:text-white relative"
-                        >
-                            <Tv className="w-4 h-4 mr-2" />
-                            Live Game
-                            {isInLiveGame && (
-                                <span className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-red-500 rounded-full animate-pulse" title="In partita!" />
-                            )}
+                        <TabsTrigger value="live-game" className="data-[state=active]:bg-[#1e6fff] data-[state=active]:text-white relative">
+                            <Tv className="w-4 h-4 mr-2" />Live Game
+                            {isInLiveGame && <span className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-red-500 rounded-full animate-pulse" title="In partita!" />}
                         </TabsTrigger>
                     </TabsList>
 
                     <TabsContent value="profile">
                         {searchData ? (
-                            <ProfileTab
-                                profile={searchData.profile}
-                                rankedSolo={searchRankedSolo}
-                                rankedFlex={searchRankedFlex}
-                                matches={searchMatches}
-                                myPuuid={searchData.puuid}
-                                mySummonerName={`${searchData.profile?.gameName}#${searchData.profile?.tagLine}`}
-                                onViewLiveGame={handleViewLiveGame}
-                                isInLiveGame={isInLiveGame}
-                            />
+                            <ProfileTab profile={searchData.profile} rankedSolo={searchRankedSolo} rankedFlex={searchRankedFlex} matches={searchMatches} myPuuid={searchData.puuid} mySummonerName={`${searchData.profile?.gameName}#${searchData.profile?.tagLine}`} onViewLiveGame={handleViewLiveGame} isInLiveGame={isInLiveGame} recentStats={searchRecentStats} />
                         ) : profileData ? (
-                            <ProfileTab
-                                profile={profileData.profile}
-                                rankedSolo={rankedSolo}
-                                rankedFlex={rankedFlex}
-                                matches={allMatches}
-                                myPuuid={myPuuid}
-                                mySummonerName={mySummonerName}
-                                onViewLiveGame={handleViewLiveGame}
-                                isInLiveGame={isInLiveGame}
-                            />
+                            <ProfileTab profile={profileData.profile} rankedSolo={rankedSolo} rankedFlex={rankedFlex} matches={allMatches} myPuuid={myPuuid} mySummonerName={mySummonerName} onViewLiveGame={handleViewLiveGame} isInLiveGame={isInLiveGame} recentStats={recentStats} />
                         ) : (
                             <div className="flex flex-col items-center justify-center h-64">
-                                {loading ? (
-                                    <p className="text-[#5a8ab0] animate-pulse">Inizializzazione in corso...</p>
-                                ) : (
-                                    <p className="text-[#3a6080]">In attesa del client di gioco...</p>
-                                )}
+                                {loading ? <p className="text-[#5a8ab0] animate-pulse">Inizializzazione in corso...</p> : <p className="text-[#3a6080]">In attesa del client di gioco...</p>}
                             </div>
                         )}
                     </TabsContent>
 
                     <TabsContent value="matches">
                         {searchData ? (
-                            <MatchHistoryTab
-                                matches={searchMatches}
-                                myPuuid={searchData.puuid}
-                                mySummonerName={`${searchData.profile?.gameName}#${searchData.profile?.tagLine}`}
-                                onPlayerClick={handlePlayerClick}
-                            />
+                            <MatchHistoryTab matches={searchMatches} myPuuid={searchData.puuid} mySummonerName={`${searchData.profile?.gameName}#${searchData.profile?.tagLine}`} onPlayerClick={handlePlayerClick} onLoadMore={loadMoreSearchMatches} loadingMore={loadingMoreSearch} region={region} />
                         ) : profileData ? (
-                            <MatchHistoryTab
-                                matches={allMatches}
-                                myPuuid={myPuuid}
-                                mySummonerName={mySummonerName}
-                                onPlayerClick={handlePlayerClick}
-                            />
+                            <MatchHistoryTab matches={allMatches} myPuuid={myPuuid} mySummonerName={mySummonerName} onPlayerClick={handlePlayerClick} onLoadMore={loadMoreMatches} loadingMore={loadingMore} region={region} />
                         ) : (
                             <div className="flex items-center justify-center h-64">
-                                {loading ? (
-                                    <p className="text-[#5a8ab0] animate-pulse">Caricamento partite...</p>
-                                ) : (
-                                    <p className="text-[#3a6080]">In attesa del client di gioco...</p>
-                                )}
+                                {loading ? <p className="text-[#5a8ab0] animate-pulse">Caricamento partite...</p> : <p className="text-[#3a6080]">In attesa del client di gioco...</p>}
                             </div>
                         )}
                     </TabsContent>
 
-                    <TabsContent value="masteries">
-                        <MasteriesTab
-                            puuid={searchData?.puuid ?? myPuuid}
-                            profile={activeProfile}
-                        />
-                    </TabsContent>
+                    <TabsContent value="masteries"><MasteriesTab puuid={searchData?.puuid ?? myPuuid} profile={activeProfile} /></TabsContent>
 
                     <TabsContent value="meta">
-                        <ChampionMetaTab
-                            matches={activeMatches}
-                            profile={activeProfile}
-                            seasonFetchDone={searchData ? searchSeasonFetchDone : seasonFetchDone}
-                            metaData={liveMetaData}
-                            myPuuid={searchData ? searchData.puuid : myPuuid}
-                            mySummonerName={searchData
-                                ? `${searchData.profile?.gameName}#${searchData.profile?.tagLine}`
-                                : mySummonerName}
-                        />
+                        <ChampionMetaTab matches={activeMatches} profile={activeProfile} seasonFetchDone={true} metaData={liveMetaData} myPuuid={searchData ? searchData.puuid : myPuuid} mySummonerName={searchData ? `${searchData.profile?.gameName}#${searchData.profile?.tagLine}` : mySummonerName} />
                     </TabsContent>
 
-                    <TabsContent value="tier-list">
-                        <MetaTab onMetaDataReady={setLiveMetaData} />
-                    </TabsContent>
-
-                    <TabsContent value="champ-select" keepMounted>
-                        <ChampSelectTab />
-                    </TabsContent>
-
-                    <TabsContent value="live-game">
-                        <LiveGameTab puuidOverride={liveGamePuuid} myPuuid={myPuuid} onStatusChange={setIsInLiveGame} />
-                    </TabsContent>
-
+                    <TabsContent value="tier-list"><MetaTab onMetaDataReady={setLiveMetaData} /></TabsContent>
+                    <TabsContent value="champ-select" keepMounted><ChampSelectTab /></TabsContent>
+                    <TabsContent value="live-game"><LiveGameTab puuidOverride={liveGamePuuid} myPuuid={myPuuid} region={region} onStatusChange={setIsInLiveGame} /></TabsContent>
                 </Tabs>
             </main>
 
-            {/* Update Banner */}
-            <UpdateBanner
-                status={updateStatus}
-                info={updateInfo}
-                progress={updateProgress}
-                onUpdate={handleUpdate}
-                onDismiss={handleDismissUpdate}
-            />
+            <UpdateBanner status={updateStatus} info={updateInfo} progress={updateProgress} onUpdate={handleUpdate} onDismiss={handleDismissUpdate} />
 
-            {/* Footer */}
             <footer className="border-t border-[#0f2040] bg-[#070f1e]/50 backdrop-blur-sm mt-16">
                 <div className="max-w-7xl mx-auto px-4 py-6">
                     <div className="flex flex-col md:flex-row items-center justify-between gap-4">
-                        <p className="text-[#5a8ab0] text-sm">
-                            RLP isn't endorsed by Riot Games and doesn't reflect the views or opinions of Riot Games.
-                        </p>
+                        <p className="text-[#5a8ab0] text-sm">RLP isn't endorsed by Riot Games and doesn't reflect the views or opinions of Riot Games.</p>
                         <p className="text-[#3a6080] text-xs">Patch 14.4 • Updated 2 hours ago</p>
                     </div>
                 </div>

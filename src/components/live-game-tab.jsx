@@ -307,7 +307,7 @@ function TeamPanel({ players, bans, side, champIdMap }) {
 
 // ── Tab principale ────────────────────────────────────────────────────────────
 
-export function LiveGameTab({ puuidOverride = null, myPuuid = null, onStatusChange = null }) {
+export function LiveGameTab({ puuidOverride = null, myPuuid = null, region = "euw", onStatusChange = null }) {
     const [data, setData] = useState(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
@@ -330,10 +330,10 @@ export function LiveGameTab({ puuidOverride = null, myPuuid = null, onStatusChan
             let res;
             if (isSelf) {
                 // Nessun puuid noto → usa il client locale LCD + Spectator
-                res = await invoke("get_live_game");
+                res = await invoke("get_live_game", { region });
             } else {
                 // Puuid noto (proprio o altrui) → usa sempre Spectator V5 diretto
-                res = await invoke("check_live_game", { puuid: puuidOverride });
+                res = await invoke("check_live_game", { puuid: puuidOverride, region });
             }
             setData(res);
             setError(null);
