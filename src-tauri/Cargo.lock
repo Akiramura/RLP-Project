@@ -3550,7 +3550,7 @@ dependencies = [
 
 [[package]]
 name = "rlp-project"
-version = "1.2.5"
+version = "1.2.6"
 dependencies = [
  "base64 0.21.7",
  "chrono",

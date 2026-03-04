@@ -190,7 +190,7 @@ async fn ranked_cache() -> &'static RwLock<HashMap<String, (std::time::Instant, 
 // ── Season filter ─────────────────────────────────────────────────────────────
 
 const SEASON_2026_START_MS:   u64 = 1_736_294_400_000; // 2026-01-08 00:00:00 UTC in ms
-const SEASON_2026_START_SECS: u64 = 1_736_294_400;     // same in seconds
+
 
 fn filter_season_matches(matches: Value) -> Value {
     match matches.as_array() {
@@ -253,28 +253,88 @@ fn encode_path(s: &str) -> String {
     }).collect::<Vec<_>>().join("")
 }
 
-async fn fetch_puuid(game_name: &str, tag_line: &str, client: &Client) -> Option<String> {
-    let url = format!(
-        "https://europe.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{}/{}",
-        encode_path(game_name), encode_path(tag_line)
-    );
-    let res = match client.get(&url).header("X-Riot-Token", riot_api_key()).send().await {
-        Ok(r)  => r,
-        Err(e) => { eprintln!("❌ fetch_puuid: {}", e); return None; }
-    };
-    if res.status().as_u16() != 200 { return None; }
-    let data: Value = res.json().await.ok()?;
-    data["puuid"].as_str().map(|s| s.to_string())
+/// Mappa la stringa regione (lowercase, inviata dal frontend) all'host della piattaforma.
+/// Esempi: "euw" → "euw1", "na" → "na1", "kr" → "kr", "jp" → "jp1"
+fn platform_host(region: &str) -> &'static str {
+    match region.to_lowercase().as_str() {
+        "euw"  | "euw1"  => "euw1",
+        "eune" | "eun1"  => "eun1",
+        "na"   | "na1"   => "na1",
+        "br"   | "br1"   => "br1",
+        "lan"  | "la1"   => "la1",
+        "las"  | "la2"   => "la2",
+        "oce"  | "oc1"   => "oc1",
+        "tr"   | "tr1"   => "tr1",
+        "ru"             => "ru",
+        "kr"             => "kr",
+        "jp"   | "jp1"   => "jp1",
+        "sg"   | "sg2"   => "sg2",
+        "tw"   | "tw2"   => "tw2",
+        "vn"   | "vn2"   => "vn2",
+        _                => "euw1", // fallback sicuro
+    }
 }
 
-async fn fetch_match_ids_since(puuid: &str, start: u32, count: u32, start_time: Option<u64>, client: &Client) -> Vec<String> {
+/// Mappa la stringa regione all'host di routing (cluster regionale).
+/// EUW/EUNE/TR/RU → europe | NA/BR/LAN/LAS → americas | KR/JP → asia | OCE/SG/TW/VN → sea
+fn routing_host(region: &str) -> &'static str {
+    match region.to_lowercase().as_str() {
+        "euw" | "euw1" | "eune" | "eun1" | "tr" | "tr1" | "ru" => "europe",
+        "na"  | "na1"  | "br"   | "br1"  | "lan" | "la1" | "las" | "la2" => "americas",
+        "kr"  | "jp"   | "jp1"  => "asia",
+        "oce" | "oc1"  | "sg"   | "sg2"  | "tw"  | "tw2" | "vn" | "vn2" => "sea",
+        _ => "europe",
+    }
+}
+
+async fn fetch_puuid(game_name: &str, tag_line: &str, region: &str, client: &Client) -> Option<String> {
+    let url = format!(
+        "https://{}.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{}/{}",
+        routing_host(region), encode_path(game_name), encode_path(tag_line)
+    );
+    // Retry fino a 3 volte: gestisce rate limit momentanei e timeout di rete
+    for attempt in 0..3u32 {
+        match client.get(&url).header("X-Riot-Token", riot_api_key()).send().await {
+            Ok(res) => {
+                let status = res.status().as_u16();
+                if status == 429 {
+                    // Rate limit — aspetta e riprova
+                    tokio::time::sleep(std::time::Duration::from_millis(1500 * (attempt + 1) as u64)).await;
+                    continue;
+                }
+                if status != 200 {
+                    eprintln!("[fetch_puuid] HTTP {} per {}/{}", status, game_name, tag_line);
+                    return None; // 404 = summoner non esiste, inutile riprovare
+                }
+                let data: Value = match res.json().await {
+                    Ok(d) => d,
+                    Err(e) => { eprintln!("[fetch_puuid] JSON error: {}", e); return None; }
+                };
+                return data["puuid"].as_str().map(|s| s.to_string());
+            }
+            Err(e) => {
+                eprintln!("[fetch_puuid] attempt {}: {}", attempt + 1, e);
+                if attempt < 2 {
+                    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+                }
+            }
+        }
+    }
+    None
+}
+
+async fn fetch_match_ids_since(puuid: &str, start: u32, count: u32, start_time: Option<u64>, end_time: Option<u64>, region: &str, client: &Client) -> Vec<String> {
     let mut url = format!(
-        "https://europe.api.riotgames.com/lol/match/v5/matches/by-puuid/{}/ids?start={}&count={}",
-        puuid, start, count
+        "https://{}.api.riotgames.com/lol/match/v5/matches/by-puuid/{}/ids?start={}&count={}",
+        routing_host(region), puuid, start, count
     );
     if let Some(ts) = start_time {
         url.push_str(&format!("&startTime={}", ts));
     }
+    if let Some(ts) = end_time {
+        url.push_str(&format!("&endTime={}", ts));
+    }
+    eprintln!("[fetch_match_ids_since] URL: {}", url);
     for attempt in 0..3u32 {
         match client.get(&url).header("X-Riot-Token", riot_api_key()).send().await {
             Ok(res) => {
@@ -282,7 +342,10 @@ async fn fetch_match_ids_since(puuid: &str, start: u32, count: u32, start_time: 
                     tokio::time::sleep(std::time::Duration::from_millis(2000 * (attempt + 1) as u64)).await;
                     continue;
                 }
-                return res.json::<Vec<String>>().await.unwrap_or_default();
+                let status = res.status().as_u16();
+                let body = res.text().await.unwrap_or_default();
+                eprintln!("[fetch_match_ids_since] status={} body={}", status, &body[..body.len().min(300)]);
+                return serde_json::from_str::<Vec<String>>(&body).unwrap_or_default();
             }
             Err(_) => return vec![],
         }
@@ -290,7 +353,7 @@ async fn fetch_match_ids_since(puuid: &str, start: u32, count: u32, start_time: 
     vec![]
 }
 
-async fn fetch_match_detail(match_id: &str, client: &Client) -> Value {
+async fn fetch_match_detail(match_id: &str, region: &str, client: &Client) -> Value {
     // Fast-path: già identificato come pre-2026 in questa sessione
     {
         let skip = pre2026_skip().await.read().await;
@@ -312,7 +375,7 @@ async fn fetch_match_detail(match_id: &str, client: &Client) -> Value {
         }
     }
 
-    let url = format!("https://europe.api.riotgames.com/lol/match/v5/matches/{}", match_id);
+    let url = format!("https://{}.api.riotgames.com/lol/match/v5/matches/{}", routing_host(&region), match_id);
     for attempt in 0..3u32 {
         match client.get(&url).header("X-Riot-Token", riot_api_key()).send().await {
             Ok(res) => {
@@ -339,7 +402,7 @@ async fn fetch_match_detail(match_id: &str, client: &Client) -> Value {
 
 /// Recupera ranked SoloQ (fallback Flex) per un puuid via League-V4.
 /// Cache in-memory TTL 5 minuti — evita chiamate ripetute per lo stesso player.
-async fn fetch_ranked_entry(puuid: String, client: Client) -> (String, String, i64) {
+async fn fetch_ranked_entry(puuid: String, region: String, client: Client) -> (String, String, i64) {
     if puuid.is_empty() { return (String::new(), String::new(), 0); }
     // Cache check
     {
@@ -350,7 +413,7 @@ async fn fetch_ranked_entry(puuid: String, client: Client) -> (String, String, i
             }
         }
     }
-    let url = format!("https://euw1.api.riotgames.com/lol/league/v4/entries/by-puuid/{}", puuid);
+    let url = format!("https://{}.api.riotgames.com/lol/league/v4/entries/by-puuid/{}", platform_host(&region), puuid);
     let entries: Vec<Value> = match client.get(&url)
         .header("X-Riot-Token", riot_api_key())
         .timeout(std::time::Duration::from_secs(10))
@@ -385,24 +448,26 @@ async fn fetch_ranked_entry(puuid: String, client: Client) -> (String, String, i
 
 /// Recupera dati smart per i badge live: summoner_level + mastery top-1.
 /// Solo 2 chiamate parallele per player.
-async fn fetch_smart_data_live(puuid: String, client: Client) -> Option<Value> {
+async fn fetch_smart_data_live(puuid: String, region: String, client: Client) -> Option<Value> {
     if puuid.is_empty() { return None; }
     let c1 = client.clone();
     let c2 = client.clone();
     let p1 = puuid.clone();
     let p2 = puuid.clone();
+    let r1 = region.clone();
+    let r2 = region.clone();
 
     let (summoner_res, masteries_res) = tokio::join!(
         async move {
-            let url = format!("https://euw1.api.riotgames.com/lol/summoner/v4/summoners/by-puuid/{}", p1);
+            let url = format!("https://{}.api.riotgames.com/lol/summoner/v4/summoners/by-puuid/{}", platform_host(&r1), p1);
             let r = c1.get(&url).header("X-Riot-Token", riot_api_key()).send().await.ok()?;
             if !r.status().is_success() { return None; }
             r.json::<Value>().await.ok()
         },
         async move {
             let url = format!(
-                "https://euw1.api.riotgames.com/lol/champion-mastery/v4/champion-masteries/by-puuid/{}/top?count=1",
-                p2
+                "https://{}.api.riotgames.com/lol/champion-mastery/v4/champion-masteries/by-puuid/{}/top?count=1",
+                platform_host(&r2), p2
             );
             let r = c2.get(&url).header("X-Riot-Token", riot_api_key()).send().await.ok()?;
             if !r.status().is_success() { return None; }
@@ -426,27 +491,27 @@ async fn fetch_smart_data_live(puuid: String, client: Client) -> Option<Value> {
 }
 
 /// Recupera profilo via Riot API (usato quando LCU non è disponibile).
-async fn fetch_profile_from_riot_api(game_name: &str, tag_line: &str, client: &Client) -> Option<Value> {
+async fn fetch_profile_from_riot_api(game_name: &str, tag_line: &str, region: &str, client: &Client) -> Option<Value> {
     eprintln!("[RLP] fetch Riot API per {}", game_name);
-    let puuid = fetch_puuid(game_name, tag_line, client).await?;
+    let puuid = fetch_puuid(game_name, tag_line, region, client).await?;
 
     let ranked_text = client
-        .get(&format!("https://euw1.api.riotgames.com/lol/league/v4/entries/by-puuid/{}", puuid))
+        .get(&format!("https://{}.api.riotgames.com/lol/league/v4/entries/by-puuid/{}", platform_host(region), puuid))
         .header("X-Riot-Token", riot_api_key())
         .send().await.ok()?
         .text().await.unwrap_or_default();
     let ranked_entries: Value = serde_json::from_str(&ranked_text).unwrap_or(json!([]));
 
     let summoner: Value = client
-        .get(&format!("https://euw1.api.riotgames.com/lol/summoner/v4/summoners/by-puuid/{}", puuid))
+        .get(&format!("https://{}.api.riotgames.com/lol/summoner/v4/summoners/by-puuid/{}", platform_host(region), puuid))
         .header("X-Riot-Token", riot_api_key())
         .send().await.ok()?
         .json().await.unwrap_or(json!({}));
 
-    let match_ids = fetch_match_ids_since(&puuid, 0, 10, Some(SEASON_2026_START_SECS), client).await;
+    let match_ids = fetch_match_ids_since(&puuid, 0, 20, None, None, region, client).await;
     let mut match_details: Vec<Value> = vec![];
     for id in match_ids.iter() {
-        let detail = fetch_match_detail(id, client).await;
+        let detail = fetch_match_detail(id, region, client).await;
         if detail.get("metadata").is_none() { continue; }
         let queue_id = detail["info"]["queueId"].as_u64().unwrap_or(1);
         if queue_id != 0 { match_details.push(detail); }
@@ -489,7 +554,7 @@ async fn fetch_profile_from_riot_api(game_name: &str, tag_line: &str, client: &C
 /// Fallback quando LCU non è raggiungibile:
 /// 1. Riot API pubblica (dati freschi)
 /// 2. Cache locale JSON (ultimo fallback)
-async fn offline_fallback(cached_data: &Option<Value>) -> Result<Value, String> {
+async fn offline_fallback(cached_data: &Option<Value>, region: &str) -> Result<Value, String> {
     if let Some(cache) = cached_data {
         let game_name = cache["profile"]["gameName"].as_str()
             .or_else(|| cache["profile"]["game_name"].as_str())
@@ -504,7 +569,7 @@ async fn offline_fallback(cached_data: &Option<Value>) -> Result<Value, String> 
                 .timeout(std::time::Duration::from_secs(15))
                 .build().unwrap();
 
-            if let Some(fresh) = fetch_profile_from_riot_api(game_name, tag_line, &client).await {
+            if let Some(fresh) = fetch_profile_from_riot_api(game_name, tag_line, region, &client).await {
                 eprintln!("[RLP] Dati freschi da Riot API (client chiuso).");
                 return Ok(fresh);
             }
@@ -515,7 +580,12 @@ async fn offline_fallback(cached_data: &Option<Value>) -> Result<Value, String> 
     match cached_data {
         Some(cache) => {
             eprintln!("[RLP] Uso cache locale come fallback.");
-            Ok(cache.clone())
+            // Applica il filtro stagione anche alla cache su disco
+            let mut c = cache.clone();
+            if let Some(matches) = cache.get("matches").cloned() {
+                c["matches"] = filter_season_matches(matches);
+            }
+            Ok(c)
         }
         None => Err("CLIENT_CLOSED".into()),
     }
@@ -636,10 +706,10 @@ fn build_live_game_from_lcd(lcd: &Value, my_summoner_name: &str) -> Value {
 }
 
 /// Chiama Spectator-V5 per un puuid.
-async fn fetch_spectator(puuid: &str, client: &Client) -> Option<Value> {
+async fn fetch_spectator(puuid: &str, region: &str, client: &Client) -> Option<Value> {
     let url = format!(
-        "https://euw1.api.riotgames.com/lol/spectator/v5/active-games/by-summoner/{}",
-        puuid
+        "https://{}.api.riotgames.com/lol/spectator/v5/active-games/by-summoner/{}",
+        platform_host(region), puuid
     );
     let res = match client.get(&url)
         .header("X-Riot-Token", riot_api_key())
@@ -659,7 +729,7 @@ async fn fetch_spectator(puuid: &str, client: &Client) -> Option<Value> {
 
 /// Normalizza la risposta Spectator V5 nel formato interno.
 /// Fetcha ranked + smart data (summoner_level + mastery) in parallelo per ogni player.
-async fn build_live_game_response(raw: &Value, my_puuid: &str, client: &Client) -> Value {
+async fn build_live_game_response(raw: &Value, my_puuid: &str, region: &str, client: &Client) -> Value {
     let queue_id   = raw["gameQueueConfigId"].as_u64().unwrap_or(0);
     let queue_type = match queue_id {
         420  => "Ranked Solo/Duo", 440 => "Ranked Flex",
@@ -697,15 +767,17 @@ async fn build_live_game_response(raw: &Value, my_puuid: &str, client: &Client) 
     let rank_handles: Vec<_> = puuids.iter().map(|puuid| {
         let p = puuid.clone();
         let c = client.clone();
-        tokio::spawn(async move { fetch_ranked_entry(p, c).await })
+        let r = region.to_string();
+        tokio::spawn(async move { fetch_ranked_entry(p, r, c).await })
     }).collect();
 
     let smart_handles: Vec<_> = puuids.iter().map(|puuid| {
         let p = puuid.clone();
         let c = client.clone();
+        let r = region.to_string();
         tokio::spawn(async move {
             if p.is_empty() { return (p, None); }
-            let sd = fetch_smart_data_live(p.clone(), c).await;
+            let sd = fetch_smart_data_live(p.clone(), r, c).await;
             (p, sd)
         })
     }).collect();
@@ -778,7 +850,7 @@ async fn build_live_game_response(raw: &Value, my_puuid: &str, client: &Client) 
 /// Carica il profilo del giocatore loggato via LCU + Riot API.
 /// Fallback: Riot API diretta → cache locale.
 #[tauri::command]
-async fn get_profiles(handle: AppHandle) -> Result<Value, String> {
+async fn get_profiles(handle: AppHandle, region: String) -> Result<Value, String> {
     let cache_p    = get_cache_path(&handle);
     let cached_data: Option<Value> = fs::read_to_string(&cache_p).ok()
         .and_then(|s| serde_json::from_str(&s).ok());
@@ -787,12 +859,12 @@ async fn get_profiles(handle: AppHandle) -> Result<Value, String> {
         Some(p) => p,
         None    => {
             eprintln!("[RLP] Client chiuso (no lockfile), offline fallback.");
-            return offline_fallback(&cached_data).await;
+            return offline_fallback(&cached_data, &region).await;
         }
     };
 
     if !lock_path.exists() {
-        return offline_fallback(&cached_data).await;
+        return offline_fallback(&cached_data, &region).await;
     }
 
     let content  = fs::read_to_string(&lock_path).map_err(|_| "Errore lockfile")?;
@@ -815,7 +887,7 @@ async fn get_profiles(handle: AppHandle) -> Result<Value, String> {
                 || msg.contains("os error 111")
             {
                 eprintln!("[RLP] LCU non raggiungibile, offline fallback.");
-                return offline_fallback(&cached_data).await;
+                return offline_fallback(&cached_data, &region).await;
             }
             return Err(msg);
         }
@@ -833,7 +905,7 @@ async fn get_profiles(handle: AppHandle) -> Result<Value, String> {
         return Err("Impossibile leggere tagLine dal client".into());
     }
 
-    let puuid = fetch_puuid(&game_name, &tag_line, &client).await
+    let puuid = fetch_puuid(&game_name, &tag_line, &region, &client).await
         .ok_or("Impossibile recuperare PUUID da Riot API")?;
 
     // Cache locale valida (< 30 min, stesso puuid, match con oggetti)
@@ -849,12 +921,12 @@ async fn get_profiles(handle: AppHandle) -> Result<Value, String> {
         if cached_puuid == puuid && !puuid.is_empty() && has_match_objects && is_fresh {
             if let Some(matches) = cache.get("matches").cloned() {
                 let filtered = filter_season_matches(matches);
-                if !filtered.as_array().map(|a| a.is_empty()).unwrap_or(true) {
-                    let mut c = cache.clone();
-                    c["matches"] = filtered;
-                    eprintln!("[RLP] Cache locale valida (< 30 min).");
-                    return Ok(c);
-                }
+                // Restituisce SEMPRE la cache filtrata, anche se vuota:
+                // in questo modo non trapelano mai partite pre-Season 2026.
+                let mut c = cache.clone();
+                c["matches"] = filtered;
+                eprintln!("[RLP] Cache locale valida (< 30 min).");
+                return Ok(c);
             } else {
                 return Ok(cache.clone());
             }
@@ -867,10 +939,10 @@ async fn get_profiles(handle: AppHandle) -> Result<Value, String> {
         .send().await.map_err(|e| e.to_string())?
         .json().await.map_err(|_| "Errore JSON Rank")?;
 
-    let match_ids = fetch_match_ids_since(&puuid, 0, 20, Some(SEASON_2026_START_SECS), &client).await;
+    let match_ids = fetch_match_ids_since(&puuid, 0, 20, None, None, &region, &client).await;
     let mut match_details: Vec<Value> = vec![];
     for id in match_ids.iter() {
-        let detail = fetch_match_detail(id, &client).await;
+        let detail = fetch_match_detail(id, &region, &client).await;
         if detail.get("metadata").is_none() { continue; }
         let queue_id = detail["info"]["queueId"].as_u64().unwrap_or(1);
         if queue_id != 0 { match_details.push(detail); }
@@ -905,32 +977,57 @@ async fn get_profiles(handle: AppHandle) -> Result<Value, String> {
     Ok(final_data)
 }
 
-/// Carica altri match per il summoner (paginazione).
+/// Carica altri match per il summoner (paginazione offset-based).
+/// `start` = numero di partite già caricate → Riot le skippa e torna le successive.
 #[tauri::command]
-async fn get_more_matches(puuid: String, start: u32) -> Result<Value, String> {
+async fn get_more_matches(puuid: String, start: u32, region: String) -> Result<Value, String> {
     let client = Client::builder().danger_accept_invalid_certs(true).build().unwrap();
-    let match_ids = fetch_match_ids_since(&puuid, start, 10, Some(SEASON_2026_START_SECS), &client).await;
+    eprintln!("[get_more_matches] start offset: {}", start);
+    let match_ids = fetch_match_ids_since(&puuid, start, 10, None, None, &region, &client).await;
+    eprintln!("[get_more_matches] IDs ricevuti da Riot: {} -> {:?}", match_ids.len(), match_ids);
+
+    // Fetch parallelo — elimina i 150ms * 10 = 1.5s di sleep artificiale
+    let tasks: Vec<_> = match_ids.iter().map(|id| {
+        let id = id.clone();
+        let region = region.clone();
+        let client = client.clone();
+        tokio::spawn(async move { fetch_match_detail(&id, &region, &client).await })
+    }).collect();
+
     let mut details: Vec<Value> = vec![];
-    for id in match_ids.iter() {
-        let detail = fetch_match_detail(id, &client).await;
-        if detail.get("metadata").is_none() { continue; }
-        let queue_id = detail["info"]["queueId"].as_u64().unwrap_or(1);
-        if queue_id == 0 { continue; }
-        let gc = detail["info"]["gameCreation"].as_u64().unwrap_or(u64::MAX);
-        if gc < SEASON_2026_START_MS { continue; }
-        details.push(detail);
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    for task in tasks {
+        if let Ok(detail) = task.await {
+            let mid = detail["metadata"]["matchId"].as_str().unwrap_or("?");
+            let gc  = detail["info"]["gameCreation"].as_u64().unwrap_or(0);
+            let qid = detail["info"]["queueId"].as_u64().unwrap_or(999);
+            if detail.get("metadata").is_none() {
+                eprintln!("[get_more_matches] SCARTATO (no metadata): {}", mid);
+                continue;
+            }
+            if qid == 0 {
+                eprintln!("[get_more_matches] SCARTATO (queueId=0 custom): {} gc={}", mid, gc);
+                continue;
+            }
+            eprintln!("[get_more_matches] OK: {} gc={} queueId={}", mid, gc, qid);
+            details.push(detail);
+        }
     }
+    // Riordina per data decrescente
+    details.sort_by(|a, b| {
+        let ga = a["info"]["gameCreation"].as_u64().unwrap_or(0);
+        let gb = b["info"]["gameCreation"].as_u64().unwrap_or(0);
+        gb.cmp(&ga)
+    });
     Ok(json!(details))
 }
 
 /// Cerca un summoner per nome#tag via Riot API.
 /// Cache in-memory TTL 10 minuti.
 #[tauri::command]
-async fn search_summoner(game_name: String, tag_line: String) -> Result<Value, String> {
+async fn search_summoner(game_name: String, tag_line: String, region: String) -> Result<Value, String> {
     let client = Client::builder().danger_accept_invalid_certs(true).build().unwrap();
 
-    let puuid = fetch_puuid(&game_name, &tag_line, &client).await
+    let puuid = fetch_puuid(&game_name, &tag_line, &region, &client).await
         .ok_or("Summoner non trovato. Controlla nome e tag.")?;
 
     // Cache check (TTL 10 min)
@@ -939,39 +1036,66 @@ async fn search_summoner(game_name: String, tag_line: String) -> Result<Value, S
         if let Some((ts, cached)) = cache.get(&puuid) {
             if ts.elapsed() < std::time::Duration::from_secs(600) {
                 eprintln!("[search] cache HIT puuid={:.20}", puuid);
-                return Ok(cached.clone());
+                let mut c = cached.clone();
+                if let Some(matches) = cached.get("matches").cloned() {
+                    c["matches"] = filter_season_matches(matches);
+                }
+                return Ok(c);
             }
         }
     }
 
     let account: Value = client
-        .get(&format!("https://europe.api.riotgames.com/riot/account/v1/accounts/by-puuid/{}", puuid))
+        .get(&format!("https://{}.api.riotgames.com/riot/account/v1/accounts/by-puuid/{}", routing_host(&region), puuid))
         .header("X-Riot-Token", riot_api_key())
         .send().await.map_err(|e| e.to_string())?
         .json().await.map_err(|_| "Errore JSON account")?;
 
     let ranked_text = client
-        .get(&format!("https://euw1.api.riotgames.com/lol/league/v4/entries/by-puuid/{}", puuid))
+        .get(&format!("https://{}.api.riotgames.com/lol/league/v4/entries/by-puuid/{}", platform_host(&region), puuid))
         .header("X-Riot-Token", riot_api_key())
         .send().await.map_err(|e| e.to_string())?
         .text().await.unwrap_or_default();
     let ranked_entries: Value = serde_json::from_str(&ranked_text).unwrap_or(json!([]));
 
-    let summoner: Value = client
-        .get(&format!("https://euw1.api.riotgames.com/lol/summoner/v4/summoners/by-puuid/{}", puuid))
+    let summoner_res = client
+        .get(&format!("https://{}.api.riotgames.com/lol/summoner/v4/summoners/by-puuid/{}", platform_host(&region), puuid))
         .header("X-Riot-Token", riot_api_key())
-        .send().await.map_err(|e| e.to_string())?
-        .json().await.unwrap_or(json!({}));
+        .send().await.map_err(|e| e.to_string())?;
 
-    let match_ids = fetch_match_ids_since(&puuid, 0, 20, Some(SEASON_2026_START_SECS), &client).await;
-    let mut match_details: Vec<Value> = vec![];
-    for id in match_ids.iter() {
-        let detail = fetch_match_detail(id, &client).await;
-        if detail.get("metadata").is_none() { continue; }
-        let queue_id = detail["info"]["queueId"].as_u64().unwrap_or(1);
-        if queue_id != 0 { match_details.push(detail); }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    // ✅ FIX: se il PUUID non esiste su questa platform (es. giocatore EUNE cercato su EUW)
+    // Riot restituisce 404 — lo intercettiamo e mostriamo un errore chiaro all'utente.
+    if summoner_res.status().as_u16() == 404 {
+        return Err(format!(
+            "Summoner non trovato su {}. Prova a cambiare region.",
+            region.to_uppercase()
+        ));
     }
+
+    let summoner: Value = summoner_res.json().await.unwrap_or(json!({}));
+
+    let match_ids = fetch_match_ids_since(&puuid, 0, 20, None, None, &region, &client).await;
+    // Fetch parallelo — 20 richieste concorrenti, molto più veloce del loop sequenziale
+    let tasks: Vec<_> = match_ids.iter().map(|id| {
+        let id = id.clone();
+        let region = region.clone();
+        let client = client.clone();
+        tokio::spawn(async move { fetch_match_detail(&id, &region, &client).await })
+    }).collect();
+    let mut match_details: Vec<Value> = vec![];
+    for task in tasks {
+        if let Ok(detail) = task.await {
+            if detail.get("metadata").is_none() { continue; }
+            let queue_id = detail["info"]["queueId"].as_u64().unwrap_or(1);
+            if queue_id != 0 { match_details.push(detail); }
+        }
+    }
+    // Riordina per data decrescente (il fetch parallelo non garantisce ordine)
+    match_details.sort_by(|a, b| {
+        let ga = a["info"]["gameCreation"].as_u64().unwrap_or(0);
+        let gb = b["info"]["gameCreation"].as_u64().unwrap_or(0);
+        gb.cmp(&ga)
+    });
 
     let normalized_entries: Vec<Value> = ranked_entries.as_array().unwrap_or(&vec![])
         .iter().map(|e| {
@@ -1117,7 +1241,7 @@ fn index_live_players(players: &Value) {
 
 /// Live game per il giocatore loggato: LCD (porta 2999) + Spectator V5 in parallelo.
 #[tauri::command]
-async fn get_live_game() -> Result<Value, String> {
+async fn get_live_game(region: String) -> Result<Value, String> {
     // Cache hit — non serviamo se dati ranked incompleti (timeout al primo caricamento).
     {
         let cache = live_game_cache().await.read().await;
@@ -1165,8 +1289,9 @@ async fn get_live_game() -> Result<Value, String> {
             .map(|lcd| build_live_game_from_lcd(&lcd, &name_for_lcd))
     });
 
+    let region_for_spec = region.clone();
     let spec_handle = tokio::spawn(async move {
-        fetch_spectator(&puuid_for_spec, &client_spectator).await
+        fetch_spectator(&puuid_for_spec, &region_for_spec, &client_spectator).await
     });
 
     // LCD prima (risposta locale ~1ms).
@@ -1206,10 +1331,11 @@ async fn get_live_game() -> Result<Value, String> {
                 let resolve_handles: Vec<_> = missing.iter().map(|name| {
                     let n = name.clone();
                     let c = client.clone();
+                    let r = region.clone();
                     tokio::spawn(async move {
                         let parts: Vec<&str> = n.splitn(2, '#').collect();
                         if parts.len() != 2 { return (n, String::new()); }
-                        let puuid = fetch_puuid(parts[0], parts[1], &c).await.unwrap_or_default();
+                        let puuid = fetch_puuid(parts[0], parts[1], &r, &c).await.unwrap_or_default();
                         (n, puuid)
                     })
                 }).collect();
@@ -1228,7 +1354,8 @@ async fn get_live_game() -> Result<Value, String> {
         let rank_handles: Vec<_> = puuid_vec.iter().map(|(_, puuid)| {
             let p = puuid.clone();
             let c = client.clone();
-            tokio::spawn(async move { fetch_ranked_entry(p, c).await })
+            let r = region.clone();
+            tokio::spawn(async move { fetch_ranked_entry(p, r, c).await })
         }).collect();
 
         let mut rank_by_puuid: HashMap<String, (String, String, i64)> = HashMap::new();
@@ -1271,7 +1398,7 @@ async fn get_live_game() -> Result<Value, String> {
     match spec_raw {
         None      => Ok(json!({ "in_game": false, "game_time": 0, "queue_type": "", "players": [] })),
         Some(raw) => {
-            let resp = build_live_game_response(&raw, &my_puuid, &client).await;
+            let resp = build_live_game_response(&raw, &my_puuid, &region, &client).await;
             index_live_players(&resp["players"]);
             live_game_cache().await.write().await
                 .insert("self".to_string(), (std::time::Instant::now(), resp.clone()));
@@ -1282,7 +1409,7 @@ async fn get_live_game() -> Result<Value, String> {
 
 /// Live game per un summoner specifico (ricerca profilo altrui) — solo Spectator V5.
 #[tauri::command]
-async fn check_live_game(puuid: String) -> Result<Value, String> {
+async fn check_live_game(puuid: String, region: String) -> Result<Value, String> {
     // Cache hit per puuid — invalida se ranked incompleti
     if !puuid.is_empty() {
         let cache = live_game_cache().await.read().await;
@@ -1309,10 +1436,10 @@ async fn check_live_game(puuid: String) -> Result<Value, String> {
         .timeout(std::time::Duration::from_secs(30))
         .build().unwrap();
 
-    match fetch_spectator(&puuid, &client).await {
+    match fetch_spectator(&puuid, &region, &client).await {
         None      => Ok(json!({ "in_game": false, "game_time": 0, "queue_type": "", "players": [] })),
         Some(raw) => {
-            let resp = build_live_game_response(&raw, &puuid, &client).await;
+            let resp = build_live_game_response(&raw, &puuid, &region, &client).await;
             index_live_players(&resp["players"]);
             if !puuid.is_empty() {
                 live_game_cache().await.write().await
@@ -1325,7 +1452,7 @@ async fn check_live_game(puuid: String) -> Result<Value, String> {
 
 /// Recupera le maestrie del summoner — cache in-memory TTL 10 minuti.
 #[tauri::command]
-async fn get_summoner_masteries(puuid: String) -> Result<Value, String> {
+async fn get_summoner_masteries(puuid: String, region: String) -> Result<Value, String> {
     {
         let cache = masteries_cache().await.read().await;
         if let Some((ts, cached)) = cache.get(&puuid) {
@@ -1341,8 +1468,8 @@ async fn get_summoner_masteries(puuid: String) -> Result<Value, String> {
         .build().unwrap();
 
     let url = format!(
-        "https://euw1.api.riotgames.com/lol/champion-mastery/v4/champion-masteries/by-puuid/{}/top?count=20",
-        puuid
+        "https://{}.api.riotgames.com/lol/champion-mastery/v4/champion-masteries/by-puuid/{}/top?count=20",
+        platform_host(&region), puuid
     );
     let res = client.get(&url).header("X-Riot-Token", riot_api_key())
         .send().await.map_err(|e| e.to_string())?;
@@ -1359,15 +1486,15 @@ async fn get_summoner_masteries(puuid: String) -> Result<Value, String> {
 
 /// Timeline di un match per gli acquisti item per minuto.
 #[tauri::command]
-async fn get_match_timeline(match_id: String) -> Result<Value, String> {
+async fn get_match_timeline(match_id: String, region: String) -> Result<Value, String> {
     let client = Client::builder()
         .danger_accept_invalid_certs(true)
         .timeout(std::time::Duration::from_secs(15))
         .build().unwrap();
 
     let url = format!(
-        "https://europe.api.riotgames.com/lol/match/v5/matches/{}/timeline",
-        match_id
+        "https://{}.api.riotgames.com/lol/match/v5/matches/{}/timeline",
+        routing_host(&region), match_id
     );
     for attempt in 0..3u32 {
         let res = client.get(&url).header("X-Riot-Token", riot_api_key())
@@ -1441,6 +1568,199 @@ async fn search_summoner_suggestions(query: String) -> Result<Value, String> {
     Ok(json!(suggestions))
 }
 
+/// Legge la regione del client League direttamente dal LCU (/riotclient/region-locale).
+/// Restituisce la regione normalizzata in minuscolo (es. "euw", "na", "kr")
+/// oppure None se il client non è aperto.
+#[tauri::command]
+async fn get_client_region() -> Result<String, String> {
+    let lock_path = get_lockfile_path().ok_or("CLIENT_CLOSED")?;
+    let content = fs::read_to_string(&lock_path).map_err(|_| "CLIENT_CLOSED")?;
+    let parts: Vec<&str> = content.split(':').collect();
+    if parts.len() < 4 { return Err("CLIENT_CLOSED".into()); }
+    let port     = parts[2];
+    let password = parts[3].trim_end_matches('\n').trim_end_matches('\r');
+    let auth     = general_purpose::STANDARD.encode(format!("riot:{}", password));
+    let client   = Client::builder().danger_accept_invalid_certs(true)
+        .timeout(std::time::Duration::from_secs(5))
+        .build().unwrap();
+
+    // /riotclient/region-locale restituisce { "region": "EUW1", "locale": "it_IT", ... }
+    let resp = client
+        .get(&format!("https://127.0.0.1:{}/riotclient/region-locale", port))
+        .header("Authorization", format!("Basic {}", auth))
+        .send().await
+        .map_err(|e| {
+            let m = e.to_string();
+            if m.contains("connection refused") || m.contains("actively refused")
+                || m.contains("os error 10061") || m.contains("os error 111") {
+                "CLIENT_CLOSED".to_string()
+            } else { m }
+        })?;
+
+    if !resp.status().is_success() { return Err("CLIENT_CLOSED".into()); }
+
+    let data: Value = resp.json().await.map_err(|_| "Errore JSON region-locale")?;
+
+    // Normalizza la piattaforma Riot (es. "EUW1" → "euw", "NA1" → "na")
+    let raw = data["region"].as_str()
+        .or_else(|| data["webRegion"].as_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    let normalized = match raw.as_str() {
+        "euw1" | "euw"  => "euw",
+        "eun1" | "eune" => "eune",
+        "na1"  | "na"   => "na",
+        "br1"  | "br"   => "br",
+        "la1"  | "lan"  => "lan",
+        "la2"  | "las"  => "las",
+        "oc1"  | "oce"  => "oce",
+        "tr1"  | "tr"   => "tr",
+        "ru"            => "ru",
+        "kr"            => "kr",
+        "jp1"  | "jp"   => "jp",
+        "sg2"  | "sg"   => "sg",
+        "tw2"  | "tw"   => "tw",
+        "vn2"  | "vn"   => "vn",
+        other           => {
+            eprintln!("[Region] Regione sconosciuta: '{}', fallback euw", other);
+            "euw"
+        }
+    };
+
+    eprintln!("[Region] Rilevata: {} → {}", raw, normalized);
+    Ok(normalized.to_string())
+}
+
+
+#[tauri::command]
+async fn get_recent_stats(puuid: String, region: String) -> Result<Value, String> {
+    let client = Client::builder()
+        .danger_accept_invalid_certs(true)
+        .timeout(std::time::Duration::from_secs(20))
+        .build().unwrap();
+
+    let seven_days_ago = {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            .saturating_sub(7 * 24 * 60 * 60)
+    };
+    // Soglia in millisecondi per confrontare con gameCreation (che è in ms)
+    let seven_days_ago_ms = seven_days_ago * 1000;
+
+    let ids_7d = fetch_match_ids_since(&puuid, 0, 100, Some(seven_days_ago), None, &region, &client).await;
+    let ids_recent = fetch_match_ids_since(&puuid, 0, 20, None, None, &region, &client).await;
+    eprintln!("[get_recent_stats] 7d={} recent={} cutoff_ms={}", ids_7d.len(), ids_recent.len(), seven_days_ago_ms);
+
+    let tasks_7d: Vec<_> = ids_7d.iter().map(|id| {
+        let id = id.clone(); let r = region.clone(); let c = client.clone();
+        tokio::spawn(async move { fetch_match_detail(&id, &r, &c).await })
+    }).collect();
+    let empty_arr: Vec<Value> = vec![];
+    let mut matches_7d: Vec<Value> = vec![];
+    for t in tasks_7d {
+        if let Ok(m) = t.await {
+            if m.get("metadata").is_none() { continue; }
+            if m["info"]["queueId"].as_u64().unwrap_or(0) == 0 { continue; }
+            // Filtro esplicito per data: la cache in-memory potrebbe restituire partite
+            // precedenti ai 7 giorni se già erano state fetchate da altre chiamate.
+            let gc = m["info"]["gameCreation"].as_u64().unwrap_or(0);
+            if gc < seven_days_ago_ms {
+                eprintln!("[get_recent_stats] SCARTATA (troppo vecchia): gc={} cutoff={}", gc, seven_days_ago_ms);
+                continue;
+            }
+            matches_7d.push(m);
+        }
+    }
+
+    // Winrate per campione (ultimi 7 giorni)
+    let mut champ_map: std::collections::HashMap<String, (u32, u32)> = std::collections::HashMap::new();
+    for m in &matches_7d {
+        let parts = m["info"]["participants"].as_array().unwrap_or(&empty_arr);
+        if let Some(me) = parts.iter().find(|p| p["puuid"].as_str() == Some(&puuid)) {
+            let champ = me["championName"].as_str().unwrap_or("").to_string();
+            if champ.is_empty() { continue; }
+            let win = me["win"].as_bool().unwrap_or(false);
+            let e = champ_map.entry(champ).or_insert((0, 0));
+            if win { e.0 += 1; }
+            e.1 += 1;
+        }
+    }
+    let mut champ_wr: Vec<Value> = champ_map.iter().map(|(name, (wins, games))| {
+        let wr = if *games > 0 { (*wins as f64 / *games as f64 * 100.0).round() as u32 } else { 0 };
+        json!({ "champion": name, "wins": wins, "losses": games - wins, "games": games, "winRate": wr })
+    }).collect();
+    champ_wr.sort_by(|a, b| b["games"].as_u64().cmp(&a["games"].as_u64()));
+
+    // Fetch ultimi 20 match per compagni
+    let tasks_r: Vec<_> = ids_recent.iter().map(|id| {
+        let id = id.clone(); let r = region.clone(); let c = client.clone();
+        tokio::spawn(async move { fetch_match_detail(&id, &r, &c).await })
+    }).collect();
+    let mut matches_recent: Vec<Value> = vec![];
+    for t in tasks_r {
+        if let Ok(m) = t.await {
+            if m.get("metadata").is_some() && m["info"]["queueId"].as_u64().unwrap_or(0) != 0 {
+                matches_recent.push(m);
+            }
+        }
+    }
+
+    // ✅ FIX: keyed per puuid, supporta riotIdGameName, fix profileIconId
+    let mut ally_map: std::collections::HashMap<String, serde_json::Map<String, Value>> = std::collections::HashMap::new();
+    for m in &matches_recent {
+        let parts = m["info"]["participants"].as_array().unwrap_or(&empty_arr);
+        let me = parts.iter().find(|p| p["puuid"].as_str() == Some(&puuid));
+        let my_team = me.and_then(|p| p["teamId"].as_u64()).unwrap_or(0);
+        if my_team == 0 { continue; }
+        let my_win = me.and_then(|p| p["win"].as_bool()).unwrap_or(false);
+        for p in parts {
+            if p["puuid"].as_str() == Some(&puuid) { continue; }
+            if p["teamId"].as_u64().unwrap_or(0) != my_team { continue; }
+            let ally_puuid = p["puuid"].as_str().unwrap_or("").to_string();
+            let name = p["riotIdGameName"].as_str()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| p["summonerName"].as_str().unwrap_or(""))
+                .to_string();
+            let tag = p["riotIdTagline"].as_str().unwrap_or("").to_string();
+            if name.is_empty() { continue; }
+            let key = if !ally_puuid.is_empty() { ally_puuid.clone() } else { format!("{}#{}", name, tag) };
+            // ✅ FIX: profileIconId prima, profileIcon come fallback
+            let icon = p["profileIconId"].as_u64()
+                .or_else(|| p["profileIcon"].as_u64())
+                .unwrap_or(1);
+            let entry = ally_map.entry(key).or_insert_with(|| {
+                let mut mm = serde_json::Map::new();
+                mm.insert("name".into(), json!(name));
+                mm.insert("tag".into(), json!(tag));
+                mm.insert("profileIconId".into(), json!(icon));
+                mm.insert("wins".into(), json!(0u32));
+                mm.insert("losses".into(), json!(0u32));
+                mm.insert("games".into(), json!(0u32));
+                mm
+            });
+            *entry.get_mut("games").unwrap() = json!(entry["games"].as_u64().unwrap_or(0) + 1);
+            if my_win { *entry.get_mut("wins").unwrap() = json!(entry["wins"].as_u64().unwrap_or(0) + 1); }
+            else { *entry.get_mut("losses").unwrap() = json!(entry["losses"].as_u64().unwrap_or(0) + 1); }
+        }
+    }
+    let mut allies: Vec<Value> = ally_map.into_values().map(Value::Object).collect();
+    allies.sort_by(|a, b| b["games"].as_u64().cmp(&a["games"].as_u64()));
+    allies.truncate(6);
+    for a in &mut allies {
+        let wins = a["wins"].as_u64().unwrap_or(0);
+        let games = a["games"].as_u64().unwrap_or(1);
+        if let Value::Object(ref mut map) = a {
+            map.insert("winRate".into(), json!((wins as f64 / games as f64 * 100.0).round() as u64));
+        }
+    }
+
+    Ok(json!({ "champWr7d": champ_wr, "recentAllies": allies }))
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -1454,11 +1774,13 @@ fn main() {
             check_live_game,
             get_summoner_masteries,
             get_match_timeline,
+            get_client_region,
             search_summoner_suggestions,
             get_champ_select_session,
             auto_import_build,
             apply_rune_page,
             debug_champ_select_slot,
+            get_recent_stats,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
